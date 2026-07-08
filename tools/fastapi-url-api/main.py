@@ -7,9 +7,18 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="Crawlee URL Result API", version="0.5.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Fixed target URLs. `url: "*"` will fetch all of them.
 FIXED_URLS = [

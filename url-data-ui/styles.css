@@ -1,0 +1,250 @@
+:root {
+  --bg-1: #f6efe2;
+  --bg-2: #d7ebe8;
+  --ink: #10221d;
+  --muted: #4b6159;
+  --card: rgba(255, 255, 255, 0.74);
+  --card-border: rgba(16, 34, 29, 0.12);
+  --accent: #0f766e;
+  --accent-2: #c2410c;
+  --ok: #166534;
+  --err: #991b1b;
+  --shadow: 0 18px 50px rgba(16, 34, 29, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: "Noto Sans SC", sans-serif;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at 10% 10%, rgba(194, 65, 12, 0.22) 0, rgba(194, 65, 12, 0) 38%),
+    radial-gradient(circle at 90% 20%, rgba(15, 118, 110, 0.24) 0, rgba(15, 118, 110, 0) 42%),
+    linear-gradient(130deg, var(--bg-1), var(--bg-2));
+}
+
+.page {
+  width: 90vw;
+  max-width: 1800px;
+  margin: 24px auto 42px;
+  display: grid;
+  gap: 16px;
+}
+
+.panel {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 18px;
+  backdrop-filter: blur(8px);
+  box-shadow: var(--shadow);
+  padding: 18px;
+}
+
+.hero h1 {
+  margin: 4px 0 8px;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: clamp(1.6rem, 2.8vw, 2.4rem);
+}
+
+.kicker {
+  margin: 0;
+  font-family: "Space Grotesk", sans-serif;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+  font-weight: 700;
+  font-size: 0.82rem;
+}
+
+.subtitle {
+  margin: 0;
+  color: var(--muted);
+}
+
+.query-box label,
+.current-url h2,
+.result h2 {
+  margin: 0 0 10px;
+  font-size: 1rem;
+}
+
+.input-grid {
+  display: grid;
+  grid-template-columns: 260px 1fr auto;
+  gap: 10px;
+}
+
+select,
+input {
+  width: 100%;
+  border: 1px solid #c4d4cd;
+  border-radius: 12px;
+  padding: 11px 12px;
+  font-size: 0.95rem;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.84);
+}
+
+input:disabled {
+  background: rgba(226, 232, 229, 0.72);
+  color: #71857e;
+}
+
+select:focus,
+input:focus {
+  outline: 2px solid rgba(15, 118, 110, 0.24);
+  border-color: var(--accent);
+}
+
+button {
+  border: 0;
+  border-radius: 12px;
+  padding: 11px 16px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  font-family: "Space Grotesk", sans-serif;
+  color: #fff;
+  background: linear-gradient(120deg, #0f766e, #0ea5a8);
+  cursor: pointer;
+}
+
+button:hover {
+  filter: brightness(1.05);
+}
+
+.hint {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+code,
+.table-wrap,
+th,
+td {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+#currentUrl {
+  display: block;
+  padding: 10px 11px;
+  border-radius: 12px;
+  background: rgba(16, 34, 29, 0.07);
+  overflow-wrap: anywhere;
+}
+
+.result-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.status {
+  font-family: "Space Grotesk", sans-serif;
+  font-weight: 700;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.status.ok {
+  color: var(--ok);
+}
+
+.status.err {
+  color: var(--err);
+}
+
+.result-tables {
+  margin-top: 12px;
+  display: grid;
+  gap: 14px;
+}
+
+.result-card {
+  border: 1px solid rgba(16, 34, 29, 0.12);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.85);
+  padding: 12px;
+}
+
+.result-card h3 {
+  margin: 0 0 10px;
+  font-size: 0.95rem;
+  overflow-wrap: anywhere;
+}
+
+.meta-line {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.table-wrap {
+  overflow: auto;
+  border-radius: 10px;
+  border: 1px solid rgba(16, 34, 29, 0.12);
+}
+
+table {
+  width: 100%;
+  min-width: 1200px;
+  border-collapse: collapse;
+  background: #fff;
+}
+
+th,
+td {
+  border-bottom: 1px solid rgba(16, 34, 29, 0.1);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+  font-size: 0.8rem;
+  line-height: 1.38;
+}
+
+th {
+  position: sticky;
+  top: 0;
+  background: #edf5f2;
+  color: #243732;
+  font-size: 0.78rem;
+}
+
+td a {
+  color: #0f766e;
+  text-decoration: none;
+}
+
+td a:hover {
+  text-decoration: underline;
+}
+
+.empty {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+@media (max-width: 920px) {
+  .input-grid {
+    grid-template-columns: 1fr;
+  }
+
+  button {
+    width: 100%;
+  }
+
+  .page {
+    width: 94vw;
+    margin-top: 16px;
+  }
+
+  .panel {
+    padding: 14px;
+  }
+}
