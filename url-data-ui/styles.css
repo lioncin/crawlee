@@ -341,7 +341,8 @@ td a:hover {
 
 .image-close,
 .image-clear-btn,
-.image-upload-btn {
+.image-upload-btn,
+.image-submit-btn {
   border: 1px solid rgba(16, 34, 29, 0.2);
   background: #fff;
   color: #0f172a;
@@ -354,7 +355,8 @@ td a:hover {
 
 .image-close:hover,
 .image-clear-btn:hover,
-.image-upload-btn:hover {
+.image-upload-btn:hover,
+.image-submit-btn:hover {
   filter: none;
   background: #f8fafc;
 }
@@ -433,4 +435,125 @@ td a:hover {
 
 .image-remove-btn:hover {
   text-decoration: underline;
+}
+
+.image-submit-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.image-upload-status {
+  margin: 8px 0 0;
+  font-size: 0.84rem;
+  color: #475569;
+}
+
+.image-upload-status.ok {
+  color: #166534;
+}
+
+.image-upload-status.err {
+  color: #b91c1c;
+}
+
+.company-info-list {
+  margin: 10px 0 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.company-info-card {
+  border: 1px solid rgba(15, 118, 110, 0.24);
+  border-radius: 10px;
+  background: rgba(241, 252, 251, 0.86);
+  padding: 8px 10px;
+}
+
+.company-info-title {
+  margin: 0 0 6px;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 0.82rem;
+  color: #0f766e;
+  font-weight: 700;
+}
+
+.company-info-meta {
+  margin: 0 0 6px;
+  font-size: 0.78rem;
+  color: #334155;
+}
+
+.company-info-meta a {
+  color: #0f766e;
+  text-decoration: none;
+}
+
+.company-info-meta a:hover {
+  text-decoration: underline;
+}
+
+.company-info-json {
+  margin: 0;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(16, 34, 29, 0.12);
+  font-size: 0.75rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Wide tables: pin first/last columns, scroll middle columns */
+.table-wrap {
+  overflow-x: auto;
+  overflow-y: auto;
+}
+
+.table-wrap table th:first-child,
+.table-wrap table td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  background: #f8fcfb;
+  box-shadow: 1px 0 0 rgba(16, 34, 29, 0.12);
+}
+
+.table-wrap table th:last-child,
+.table-wrap table td:last-child {
+  position: sticky;
+  right: 0;
+  z-index: 3;
+  background: #f8fcfb;
+  box-shadow: -1px 0 0 rgba(16, 34, 29, 0.12);
+}
+
+.table-wrap table thead th:first-child,
+.table-wrap table thead th:last-child {
+  z-index: 5;
+  background: #edf5f2;
+}
+
+/* Keep page width stable: only table-wrap can scroll horizontally */
+body {
+  overflow-x: hidden;
+}
+
+.page,
+.panel,
+.result-card,
+.result-tables {
+  min-width: 0;
+}
+
+.result .table-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: auto;
+}
+
+.result .table-wrap table {
+  width: max-content;
+  min-width: 100%;
 }

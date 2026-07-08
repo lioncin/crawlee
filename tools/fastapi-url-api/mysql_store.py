@@ -254,6 +254,82 @@ def store_fetch_result(request_url: str, result_payload: dict[str, Any]) -> None
         conn.commit()
 
 
+def _hydrate_page_items_from_entity(cur, source_url: str, page_payload: dict[str, Any]) -> None:
+    items = page_payload.get("items")
+    if not isinstance(items, list) or not items:
+        return
+
+    notice_urls = [
+        str(item.get("url") or "").strip()
+        for item in items
+        if isinstance(item, dict) and str(item.get("url") or "").strip()
+    ]
+    if not notice_urls:
+        return
+
+    placeholders = ",".join(["%s"] * len(notice_urls))
+    cur.execute(
+        f"""
+        SELECT x.notice_url, x.issuer_full_name, x.extra
+        FROM (
+          SELECT
+            ei.url AS notice_url,
+            ei.issuer_full_name,
+            ei.extra,
+            ROW_NUMBER() OVER (
+              PARTITION BY ei.url
+              ORDER BY cr.task_time DESC, cr.record_id DESC, ei.item_id DESC
+            ) AS rn
+          FROM entity_item ei
+          JOIN crawl_record cr ON cr.record_id = ei.record_id
+          JOIN source_config sc ON sc.source_id = cr.source_id
+          WHERE sc.source_url = %s
+            AND ei.url IN ({placeholders})
+        ) x
+        WHERE x.rn = 1
+        """,
+        (source_url, *notice_urls),
+    )
+    rows = cur.fetchall() or []
+    by_notice_url = {str(row.get("notice_url") or ""): row for row in rows}
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        notice_url = str(item.get("url") or "").strip()
+        if not notice_url:
+            continue
+
+        row = by_notice_url.get(notice_url)
+        if not row:
+            continue
+
+        issuer_name = (row.get("issuer_full_name") or "").strip()
+        if issuer_name:
+            item["issuer_full_name"] = issuer_name
+
+        row_extra = _loads_json(row.get("extra"))
+        if not isinstance(row_extra, dict):
+            continue
+
+        current_extra = item.get("extra")
+        merged_extra = current_extra if isinstance(current_extra, dict) else {}
+        merged_extra.update(row_extra)
+        item["extra"] = merged_extra
+
+        ai_recognition = row_extra.get("ai_recognition")
+        if isinstance(ai_recognition, dict):
+            company_info = ai_recognition.get("company_info")
+            if isinstance(company_info, dict):
+                item["company_info"] = company_info
+
+        if not isinstance(item.get("company_info"), dict):
+            ai_company_info = row_extra.get("ai_company_info")
+            if isinstance(ai_company_info, dict):
+                item["company_info"] = ai_company_info
+
+
 def load_latest_results_from_mysql(source_url: str | None = None, limit: int = 20) -> dict[str, Any]:
     cfg = _mysql_config()
     safe_limit = max(1, min(int(limit), 100))
@@ -276,7 +352,10 @@ def load_latest_results_from_mysql(source_url: str | None = None, limit: int = 2
                 if not row:
                     return {}
                 payload = _loads_json(row.get("raw_payload")) or {}
-                return {str(row.get("source_url")): payload}
+                src = str(row.get("source_url"))
+                if isinstance(payload, dict):
+                    _hydrate_page_items_from_entity(cur, src, payload)
+                return {src: payload}
 
             cur.execute(
                 """
@@ -308,6 +387,146 @@ def load_latest_results_from_mysql(source_url: str | None = None, limit: int = 2
                 payload = _loads_json(row.get("raw_payload"))
                 if payload is None:
                     continue
+                if isinstance(payload, dict):
+                    _hydrate_page_items_from_entity(cur, src, payload)
                 result[src] = payload
 
             return result
+
+
+def save_issuer_recognition_result(
+    source_url: str,
+    notice_url: str,
+    issuer_name: str | None,
+    recognition_payload: dict[str, Any],
+) -> dict[str, Any]:
+    cfg = _mysql_config()
+    safe_source_url = (source_url or "").strip()
+    safe_notice_url = (notice_url or "").strip()
+    safe_issuer_name = (issuer_name or "").strip()
+
+    if not safe_notice_url:
+        raise ValueError("notice_url must not be empty")
+
+    parsed = recognition_payload.get("parsed") if isinstance(recognition_payload, dict) else None
+    parsed = parsed if isinstance(parsed, dict) else {}
+    company_info = parsed.get("company_info") if isinstance(parsed.get("company_info"), dict) else {}
+
+    # Keep a display patch aligned with UI columns.
+    patch: dict[str, Any] = {}
+    issuer_from_ai = (
+        company_info.get("issuer_full_name")
+        or company_info.get("company_name")
+        or company_info.get("name")
+    )
+    if issuer_from_ai or safe_issuer_name:
+        patch["issuer_full_name"] = str(issuer_from_ai or safe_issuer_name).strip() or None
+
+    for key in (
+        "board",
+        "audit_status",
+        "province",
+        "industry",
+        "sponsor",
+        "law_firm",
+        "accounting_firm",
+        "update_date",
+        "accept_date",
+    ):
+        val = company_info.get(key)
+        if val is not None:
+            patch[key] = str(val).strip() or None
+
+    with pymysql.connect(**cfg) as conn:
+        with conn.cursor() as cur:
+            params: list[Any] = [safe_notice_url]
+            where_sql = "ei.url = %s"
+
+            if safe_source_url:
+                where_sql += " AND sc.source_url = %s"
+                params.append(safe_source_url)
+
+            if safe_issuer_name:
+                where_sql += " AND (ei.issuer_full_name = %s OR ei.issuer_full_name IS NULL OR ei.issuer_full_name = '')"
+                params.append(safe_issuer_name)
+
+            cur.execute(
+                f"""
+                SELECT ei.item_id, ei.extra
+                FROM entity_item ei
+                JOIN crawl_record cr ON cr.record_id = ei.record_id
+                JOIN source_config sc ON sc.source_id = cr.source_id
+                WHERE {where_sql}
+                ORDER BY cr.task_time DESC, cr.record_id DESC, ei.item_id DESC
+                LIMIT 1
+                """,
+                tuple(params),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise ValueError("Target item not found in MySQL")
+
+            item_id = int(row["item_id"])
+            old_extra = _loads_json(row.get("extra"))
+            merged_extra = old_extra if isinstance(old_extra, dict) else {}
+            merged_extra.update(
+                {
+                    "ai_recognition": parsed if parsed else None,
+                    "ai_image_urls": recognition_payload.get("image_urls") or [],
+                    "ai_model": recognition_payload.get("model"),
+                    "ai_raw_text": recognition_payload.get("raw_text"),
+                    "ai_updated_at": datetime.now().isoformat(timespec="seconds"),
+                }
+            )
+
+            cur.execute("UPDATE entity_item SET extra = %s WHERE item_id = %s", (_to_json(merged_extra), item_id))
+
+            if patch.get("issuer_full_name"):
+                cur.execute(
+                    "UPDATE entity_item SET issuer_full_name = %s WHERE item_id = %s",
+                    (patch.get("issuer_full_name"), item_id),
+                )
+
+            cur.execute("DELETE FROM entity_kv WHERE item_id = %s AND field_key LIKE 'ai_%%'", (item_id,))
+
+            ai_kv_rows = [
+                ("ai_company_info", company_info if isinstance(company_info, dict) else None),
+                ("ai_evidence", parsed.get("evidence") if isinstance(parsed, dict) else None),
+                ("ai_full_ocr_text", parsed.get("full_ocr_text") if isinstance(parsed, dict) else None),
+                ("ai_uncertain_items", parsed.get("uncertain_items") if isinstance(parsed, dict) else None),
+                ("ai_image_urls", recognition_payload.get("image_urls") or []),
+                ("ai_model", recognition_payload.get("model")),
+            ]
+
+            for field_key, value in ai_kv_rows:
+                if value is None:
+                    field_type = "null"
+                    field_value = None
+                elif isinstance(value, bool):
+                    field_type = "bool"
+                    field_value = "1" if value else "0"
+                elif isinstance(value, (int, float)):
+                    field_type = "number"
+                    field_value = str(value)
+                elif isinstance(value, str):
+                    field_type = "string"
+                    field_value = value
+                else:
+                    field_type = "json"
+                    field_value = _to_json(value)
+
+                cur.execute(
+                    """
+                    INSERT INTO entity_kv (item_id, field_key, field_value, field_type)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (item_id, field_key, field_value, field_type),
+                )
+
+        conn.commit()
+
+    return {
+        "item_id": item_id,
+        "item_patch": patch,
+        "company_info": company_info,
+    }

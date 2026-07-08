@@ -2,17 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import uuid
+from datetime import datetime, timezone
 from html import unescape
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from fastapi import FastAPI, HTTPException
+import oss2
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from llm_client import LLMClientError, chat_completion, extract_issuer_names_from_titles
-from mysql_store import load_latest_results_from_mysql, store_fetch_result
+from llm_client import LLMClientError, chat_completion, extract_issuer_names_from_titles, recognize_company_from_images
+from mysql_store import load_latest_results_from_mysql, save_issuer_recognition_result, store_fetch_result
+
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 app = FastAPI(title="Crawlee URL Result API", version="0.5.0")
 
@@ -30,6 +37,12 @@ FIXED_URLS = [
     "https://www.sse.com.cn/listing/renewal/ipo/",
 ]
 
+OSS_ENDPOINT = os.getenv("OSS_ENDPOINT", "https://oss-cn-hangzhou.aliyuncs.com")
+OSS_BUCKET_NAME = os.getenv("OSS_BUCKET_NAME", "")
+OSS_ACCESS_KEY_ID = os.getenv("OSS_ACCESS_KEY_ID", "")
+OSS_ACCESS_KEY_SECRET = os.getenv("OSS_ACCESS_KEY_SECRET", "")
+OSS_PUBLIC_BASE_URL = os.getenv("OSS_PUBLIC_BASE_URL", "").rstrip("/")
+
 
 class FetchRequest(BaseModel):
     url: str
@@ -44,6 +57,14 @@ class LLMChatRequest(BaseModel):
 
 class LLMChatResponse(BaseModel):
     content: str
+
+
+class IssuerRecognitionRequest(BaseModel):
+    source_url: str
+    notice_url: str
+    issuer_name: str
+    image_urls: list[str] = Field(default_factory=list)
+    timeout_seconds: float = 180.0
 
 
 class NoticeItem(BaseModel):
@@ -96,6 +117,38 @@ _CURR_STATUS_MAP = {
     "6": "中止",
     "7": "终止",
 }
+
+_IMAGE_EXT_BY_CONTENT_TYPE = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+}
+
+def ensure_oss_ready() -> tuple[oss2.Bucket, str]:
+    missing = [
+        key
+        for key, val in (
+            ("OSS_BUCKET_NAME", OSS_BUCKET_NAME),
+            ("OSS_ACCESS_KEY_ID", OSS_ACCESS_KEY_ID),
+            ("OSS_ACCESS_KEY_SECRET", OSS_ACCESS_KEY_SECRET),
+        )
+        if not val
+    ]
+    if missing:
+        raise HTTPException(status_code=500, detail=f"OSS config missing: {', '.join(missing)}")
+
+    auth = oss2.Auth(OSS_ACCESS_KEY_ID, OSS_ACCESS_KEY_SECRET)
+    bucket = oss2.Bucket(auth, OSS_ENDPOINT, OSS_BUCKET_NAME)
+
+    if OSS_PUBLIC_BASE_URL:
+        public_base = OSS_PUBLIC_BASE_URL
+    else:
+        endpoint_host = OSS_ENDPOINT.replace("https://", "").replace("http://", "").rstrip("/")
+        public_base = f"https://{OSS_BUCKET_NAME}.{endpoint_host}"
+
+    return bucket, public_base
 
 
 def extract_title(html: str) -> str | None:
@@ -358,6 +411,88 @@ async def fetch_url(payload: FetchRequest) -> FetchResponse | dict[str, FetchRes
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to persist result to MySQL: {exc}") from exc
 
+
+@app.post("/upload/image")
+async def upload_images_to_oss(
+    files: list[UploadFile] = File(...),
+) -> dict[str, list[dict[str, str]]]:
+    if not files:
+        raise HTTPException(status_code=422, detail="No file uploaded")
+
+    bucket, public_base = ensure_oss_ready()
+    date_part = datetime.now(timezone.utc).strftime("%Y%m%d")
+    uploaded: list[dict[str, str]] = []
+
+    try:
+        for f in files:
+            content_type = (f.content_type or "").lower()
+            if not content_type.startswith("image/"):
+                continue
+
+            raw_name = os.path.basename(f.filename or "")
+            ext = os.path.splitext(raw_name)[1].lower()
+            if not ext:
+                ext = _IMAGE_EXT_BY_CONTENT_TYPE.get(content_type, ".png")
+
+            object_name = f"{date_part}/{uuid.uuid4().hex}{ext}"
+            content = await f.read()
+            result = await asyncio.to_thread(bucket.put_object, object_name, content)
+            if result.status != 200:
+                raise HTTPException(status_code=502, detail=f"OSS upload failed for {raw_name or 'image'}")
+
+            uploaded.append(
+                {
+                    "name": raw_name or object_name,
+                    "object_name": object_name,
+                    "url": f"{public_base}/{object_name}",
+                }
+            )
+    except oss2.exceptions.OssError as exc:
+        raise HTTPException(status_code=502, detail=f"OSS error: {exc}") from exc
+    finally:
+        for f in files:
+            await f.close()
+
+    if not uploaded:
+        raise HTTPException(status_code=422, detail="No image files in upload")
+
+    return {"uploaded": uploaded}
+
+
+@app.post("/issuer/recognize")
+async def recognize_issuer_from_images(payload: IssuerRecognitionRequest) -> dict[str, object]:
+    notice_url = payload.notice_url.strip()
+    if not notice_url:
+        raise HTTPException(status_code=422, detail="notice_url must not be empty")
+
+    image_urls = [str(u).strip() for u in payload.image_urls if str(u).strip()]
+    if not image_urls:
+        raise HTTPException(status_code=422, detail="image_urls must not be empty")
+
+    try:
+        recognition = await recognize_company_from_images(image_urls, timeout_seconds=payload.timeout_seconds)
+        saved = await asyncio.to_thread(
+            save_issuer_recognition_result,
+            payload.source_url.strip(),
+            notice_url,
+            payload.issuer_name.strip(),
+            recognition,
+        )
+
+        return {
+            "status": "ok",
+            "item_id": saved.get("item_id"),
+            "item_patch": saved.get("item_patch") or {},
+            "company_info": saved.get("company_info") or {},
+            "image_urls": recognition.get("image_urls") or [],
+        }
+    except LLMClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to save recognition result: {exc}") from exc
+
 @app.post("/llm/chat", response_model=LLMChatResponse)
 async def llm_chat(payload: LLMChatRequest) -> LLMChatResponse:
     try:
@@ -365,6 +500,7 @@ async def llm_chat(payload: LLMChatRequest) -> LLMChatResponse:
         return LLMChatResponse(content=content)
     except LLMClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
 
 @app.get("/results/mysql")
 async def get_results_from_mysql(source_url: str | None = None, limit: int = 20) -> dict[str, dict]:
