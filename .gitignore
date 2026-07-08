@@ -38,3 +38,6 @@ vitest.config.local.mts
 # Python local environments and caches
 .venv/
 __pycache__/
+
+# Local secrets for FastAPI URL API
+tools/fastapi-url-api/.env

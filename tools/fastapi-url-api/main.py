@@ -10,6 +10,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from llm_client import LLMClientError, chat_completion, extract_issuer_names_from_titles
+
 app = FastAPI(title="Crawlee URL Result API", version="0.5.0")
 
 app.add_middleware(
@@ -31,6 +33,15 @@ class FetchRequest(BaseModel):
     url: str
     timeout_seconds: float = 20.0
     include_html: bool = False
+
+
+class LLMChatRequest(BaseModel):
+    prompt: str
+    timeout_seconds: float = 30.0
+
+
+class LLMChatResponse(BaseModel):
+    content: str
 
 
 class NoticeItem(BaseModel):
@@ -144,6 +155,31 @@ def map_curr_status(row: dict) -> str:
     return _CURR_STATUS_MAP.get(code, code)
 
 
+async def fill_missing_issuer_full_name(items: list[NoticeItem]) -> None:
+    missing_indexes: list[int] = []
+    missing_titles: list[str] = []
+
+    for idx, item in enumerate(items):
+        if item.issuer_full_name and item.issuer_full_name.strip():
+            continue
+        if not item.title or not item.title.strip():
+            continue
+        missing_indexes.append(idx)
+        missing_titles.append(item.title.strip())
+
+    if not missing_titles:
+        return
+
+    try:
+        inferred = await extract_issuer_names_from_titles(missing_titles)
+    except LLMClientError:
+        return
+
+    for idx, issuer_name in zip(missing_indexes, inferred):
+        if issuer_name and issuer_name.strip():
+            items[idx].issuer_full_name = issuer_name.strip()
+
+
 async def fetch_sse_ipo_items(client: httpx.AsyncClient) -> list[NoticeItem]:
     params = {
         "jsonCallBack": "cb",
@@ -238,6 +274,9 @@ async def fetch_one_url(
         items = await fetch_sse_ipo_items(client)
 
     if items:
+        await fill_missing_issuer_full_name(items)
+
+    if items:
         lines = []
         for item in items:
             lines.append(
@@ -302,3 +341,11 @@ async def fetch_url(payload: FetchRequest) -> FetchResponse | dict[str, FetchRes
         raise HTTPException(status_code=504, detail="Upstream request timed out") from exc
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Upstream request failed: {exc}") from exc
+
+@app.post("/llm/chat", response_model=LLMChatResponse)
+async def llm_chat(payload: LLMChatRequest) -> LLMChatResponse:
+    try:
+        content = await chat_completion(payload.prompt, timeout_seconds=payload.timeout_seconds)
+        return LLMChatResponse(content=content)
+    except LLMClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

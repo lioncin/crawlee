@@ -11,13 +11,26 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+## LLM Environment
+
+Create local `.env` (do not commit):
+
+```env
+LLM_MODEL=gpt-5.5
+LLM_PROVIDER=openai-custom
+LLM_BASE_URL=https://api2.100zy.cn/v1
+LLM_API_KEY=your_api_key_here
+```
+
+A template file is provided: `.env.example`.
+
 ## Run
 
 ```bash
 uvicorn main:app --host 0.0.0.0 --port 8765 --reload
 ```
 
-## Call
+## URL Fetch API
 
 Return extracted content (default):
 
@@ -37,23 +50,18 @@ curl -X POST 'http://127.0.0.1:8765/fetch' \
   -d '{"url":"https://www.szse.cn/disclosure/notice/company/index.html","include_html":true}'
 ```
 
-Example response:
+## LLM API
+
+```bash
+curl -X POST 'http://127.0.0.1:8765/llm/chat' \
+  -H 'content-type: application/json' \
+  -d '{"prompt":"请总结今天的IPO公告重点"}'
+```
+
+Response:
 
 ```json
 {
-  "url": "https://www.szse.cn/disclosure/notice/company/index.html",
-  "final_url": "https://www.szse.cn/disclosure/notice/company/index.html",
-  "status_code": 200,
-  "title": "深交所主页",
-  "html_length": 88203,
-  "text": "2026-07-01 关于华润新能源控股有限公司股票上市交易的公告 https://www.szse.cn/disclosure/notice/company/t20260701_621407.html",
-  "items": [
-    {
-      "date": "2026-07-01",
-      "title": "关于华润新能源控股有限公司股票上市交易的公告",
-      "url": "https://www.szse.cn/disclosure/notice/company/t20260701_621407.html"
-    }
-  ],
-  "html": null
+  "content": "..."
 }
 ```
