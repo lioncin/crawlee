@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from html import unescape
@@ -11,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from llm_client import LLMClientError, chat_completion, extract_issuer_names_from_titles
+from mysql_store import store_fetch_result
 
 app = FastAPI(title="Crawlee URL Result API", version="0.5.0")
 
@@ -331,16 +333,30 @@ async def fetch_url(payload: FetchRequest) -> FetchResponse | dict[str, FetchRes
                 results: dict[str, FetchResponse] = {}
                 for target in FIXED_URLS:
                     results[target] = await fetch_one_url(client, target, payload.include_html)
+
+                await asyncio.to_thread(
+                    store_fetch_result,
+                    url,
+                    {k: v.model_dump(mode="json") for k, v in results.items()},
+                )
                 return results
 
             if not is_valid_http_url(url):
-                raise HTTPException(status_code=422, detail="url must be a valid http/https URL or '*' ")
+                raise HTTPException(status_code=422, detail="url must be a valid http/https URL or '*'")
 
-            return await fetch_one_url(client, url, payload.include_html)
+            single_result = await fetch_one_url(client, url, payload.include_html)
+            await asyncio.to_thread(
+                store_fetch_result,
+                url,
+                single_result.model_dump(mode="json"),
+            )
+            return single_result
     except httpx.TimeoutException as exc:
         raise HTTPException(status_code=504, detail="Upstream request timed out") from exc
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Upstream request failed: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to persist result to MySQL: {exc}") from exc
 
 @app.post("/llm/chat", response_model=LLMChatResponse)
 async def llm_chat(payload: LLMChatRequest) -> LLMChatResponse:

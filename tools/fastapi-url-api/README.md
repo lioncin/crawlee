@@ -65,3 +65,17 @@ Response:
   "content": "..."
 }
 ```
+## MySQL Persistence
+
+After each successful `/fetch`, the API will persist data into MySQL tables:
+
+- `source_config`
+- `crawl_record`
+- `entity_item`
+- `entity_kv`
+
+Make sure `.env` has valid MySQL settings and tables are created from:
+
+```bash
+mysql -u root -p crawlee_data < /home/linxing/git/crawlee/sql/flexible_storage_schema.sql
+```
