@@ -34,6 +34,7 @@ def _mysql_config() -> dict[str, Any]:
         "database": os.getenv("MYSQL_DATABASE", "crawlee_data"),
         "charset": "utf8mb4",
         "autocommit": False,
+        "cursorclass": pymysql.cursors.DictCursor,
     }
 
 
@@ -64,14 +65,30 @@ def _to_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _loads_json(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", errors="ignore")
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
 def _iter_pages(request_url: str, result_payload: dict[str, Any]) -> Iterable[tuple[str, dict[str, Any]]]:
-    # Single page shape
     if "status_code" in result_payload and "url" in result_payload:
         source_url = str(result_payload.get("url") or request_url)
         yield source_url, result_payload
         return
 
-    # Multi-page shape: {source_url: {...}}
     for source_url, page in result_payload.items():
         if isinstance(page, dict):
             yield str(source_url), page
@@ -235,3 +252,62 @@ def store_fetch_result(request_url: str, result_payload: dict[str, Any]) -> None
                     _save_item_kv(cur, item_id, item)
 
         conn.commit()
+
+
+def load_latest_results_from_mysql(source_url: str | None = None, limit: int = 20) -> dict[str, Any]:
+    cfg = _mysql_config()
+    safe_limit = max(1, min(int(limit), 100))
+
+    with pymysql.connect(**cfg) as conn:
+        with conn.cursor() as cur:
+            if source_url:
+                cur.execute(
+                    """
+                    SELECT sc.source_url, cr.raw_payload
+                    FROM crawl_record cr
+                    JOIN source_config sc ON sc.source_id = cr.source_id
+                    WHERE sc.source_url = %s
+                    ORDER BY cr.task_time DESC, cr.record_id DESC
+                    LIMIT 1
+                    """,
+                    (source_url,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {}
+                payload = _loads_json(row.get("raw_payload")) or {}
+                return {str(row.get("source_url")): payload}
+
+            cur.execute(
+                """
+                SELECT x.source_url, x.raw_payload
+                FROM (
+                  SELECT
+                    sc.source_url,
+                    cr.raw_payload,
+                    cr.task_time,
+                    cr.record_id,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY cr.source_id
+                      ORDER BY cr.task_time DESC, cr.record_id DESC
+                    ) AS rn
+                  FROM crawl_record cr
+                  JOIN source_config sc ON sc.source_id = cr.source_id
+                ) x
+                WHERE x.rn = 1
+                ORDER BY x.task_time DESC, x.record_id DESC
+                LIMIT %s
+                """,
+                (safe_limit,),
+            )
+            rows = cur.fetchall() or []
+
+            result: dict[str, Any] = {}
+            for row in rows:
+                src = str(row.get("source_url"))
+                payload = _loads_json(row.get("raw_payload"))
+                if payload is None:
+                    continue
+                result[src] = payload
+
+            return result

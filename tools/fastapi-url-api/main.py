@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from llm_client import LLMClientError, chat_completion, extract_issuer_names_from_titles
-from mysql_store import store_fetch_result
+from mysql_store import load_latest_results_from_mysql, store_fetch_result
 
 app = FastAPI(title="Crawlee URL Result API", version="0.5.0")
 
@@ -365,3 +365,11 @@ async def llm_chat(payload: LLMChatRequest) -> LLMChatResponse:
         return LLMChatResponse(content=content)
     except LLMClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+@app.get("/results/mysql")
+async def get_results_from_mysql(source_url: str | None = None, limit: int = 20) -> dict[str, dict]:
+    try:
+        data = await asyncio.to_thread(load_latest_results_from_mysql, source_url, limit)
+        return data
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to query results from MySQL: {exc}") from exc

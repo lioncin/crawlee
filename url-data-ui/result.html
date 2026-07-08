@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>结果展示</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="panel hero">
+        <p class="kicker">Data Console</p>
+        <h1>分析结果</h1>      </section>
+
+      <section class="panel result">
+        <div class="result-head">
+          <h2>查询结果</h2>
+          <span id="statusText" class="status">等待加载</span>
+        </div>
+        <div id="resultTables" class="result-tables"></div>
+      </section>
+    </main>
+
+    <script src="./result.js"></script>
+  </body>
+</html>
