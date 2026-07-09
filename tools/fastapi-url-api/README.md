@@ -40,7 +40,7 @@ curl -X POST 'http://127.0.0.1:8765/fetch' \
   -d '{"url":"https://www.szse.cn/disclosure/notice/company/index.html"}'
 ```
 
-For list pages like SZSE notices, response includes `items` with date/title/url.
+For list pages like SZSE/SSE/HKEX notices, response includes `items` with date/title/url.
 
 Return text + full HTML:
 

@@ -35,6 +35,7 @@ app.add_middleware(
 FIXED_URLS = [
     "https://www.szse.cn/disclosure/notice/company/index.html",
     "https://www.sse.com.cn/listing/renewal/ipo/",
+    "https://www2.hkexnews.hk/New-Listings/New-Listing-Information/Main-Board?sc_lang=zh-HK",
 ]
 
 OSS_ENDPOINT = os.getenv("OSS_ENDPOINT", "https://oss-cn-hangzhou.aliyuncs.com")
@@ -102,6 +103,15 @@ _NOTICE_ITEM_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _JSONP_WRAP_RE = re.compile(r"^[\w$]+\((.*)\)\s*;?$", re.DOTALL)
+_HKEX_UPDATED_DATE_RE = re.compile(r"更新日期:\s*([0-9]{4})年([0-9]{1,2})月([0-9]{1,2})日")
+_HKEX_TABLE_BODY_RE = re.compile(
+    r"<table[^>]*class=\"[^\"]*table-mobile-list[^\"]*\"[^>]*>.*?<tbody>(.*?)</tbody>",
+    re.IGNORECASE | re.DOTALL,
+)
+_HKEX_ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
+_HKEX_CELL_RE = re.compile(r"<td\b[^>]*>(.*?)</td>", re.IGNORECASE | re.DOTALL)
+_HKEX_LINK_RE = re.compile(r"href\s*=\s*[\"\x27]([^\"\x27]+)[\"\x27]", re.IGNORECASE)
+_HKEX_DATE_IN_URL_RE = re.compile(r"/(20[0-9]{2})/([01][0-9])([0-3][0-9])/")
 
 _ISSUE_MARKET_MAP = {
     "1": "科创板",
@@ -183,6 +193,10 @@ def is_sse_listing_ipo(url: str) -> bool:
     parsed = urlparse(url)
     return parsed.netloc.endswith("sse.com.cn") and parsed.path.startswith("/listing/renewal/ipo")
 
+def is_hkex_new_listing_info(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.netloc.endswith("hkexnews.hk") and parsed.path.startswith("/New-Listings/New-Listing-Information/Main-Board")
+
 
 def is_valid_http_url(url: str) -> bool:
     parsed = urlparse(url)
@@ -208,6 +222,81 @@ def get_intermediary_name(intermediary: list[dict], intermediary_type: int) -> s
 def map_curr_status(row: dict) -> str:
     code = str(row.get("currStatus") or "")
     return _CURR_STATUS_MAP.get(code, code)
+
+def clean_html_fragment(fragment: str) -> str:
+    no_tags = _STRIP_TAGS_RE.sub(" ", fragment)
+    decoded = unescape(no_tags).replace("\xa0", " ")
+    return re.sub(r"\s+", " ", decoded).strip()
+
+
+def parse_hkex_updated_date(html: str) -> str:
+    match = _HKEX_UPDATED_DATE_RE.search(html)
+    if not match:
+        return ""
+    year, month, day = match.groups()
+    return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+
+
+def parse_hkex_date_from_url(url: str) -> str:
+    match = _HKEX_DATE_IN_URL_RE.search(url)
+    if not match:
+        return ""
+    year, month, day = match.groups()
+    return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+
+
+def extract_hkex_main_board_items(html: str, base_url: str) -> list[NoticeItem]:
+    table_match = _HKEX_TABLE_BODY_RE.search(html)
+    if not table_match:
+        return []
+
+    updated_date = parse_hkex_updated_date(html)
+    rows_html = table_match.group(1)
+    rows = _HKEX_ROW_RE.findall(rows_html)
+
+    document_types = ("新上市公告", "招股章程", "股份配發結果")
+    items: list[NoticeItem] = []
+    seen_links: set[str] = set()
+
+    for row_html in rows:
+        cells = _HKEX_CELL_RE.findall(row_html)
+        if len(cells) < 5:
+            continue
+
+        stock_code = clean_html_fragment(cells[0])
+        stock_name = clean_html_fragment(cells[1])
+        issuer_name = stock_name or None
+
+        for doc_type, doc_cell in zip(document_types, cells[2:5]):
+            for raw_href in _HKEX_LINK_RE.findall(doc_cell):
+                href = unescape(raw_href).strip()
+                if not href or href.startswith("#") or href.lower().startswith("javascript:"):
+                    continue
+                full_url = urljoin(base_url, href)
+                if full_url in seen_links:
+                    continue
+                seen_links.add(full_url)
+
+                date = parse_hkex_date_from_url(full_url) or updated_date
+                display_name = stock_name or stock_code or "未知公司"
+                if stock_code:
+                    title = f"{display_name}({stock_code}) {doc_type}"
+                else:
+                    title = f"{display_name} {doc_type}"
+
+                items.append(
+                    NoticeItem(
+                        date=date,
+                        title=title,
+                        url=full_url,
+                        issuer_full_name=issuer_name,
+                        board="港交所主板",
+                        audit_status=doc_type,
+                        update_date=updated_date or None,
+                    )
+                )
+
+    return items
 
 
 async def fill_missing_issuer_full_name(items: list[NoticeItem]) -> None:
@@ -327,6 +416,8 @@ async def fetch_one_url(
     items = extract_notice_items(html, final_url)
     if not items and is_sse_listing_ipo(final_url):
         items = await fetch_sse_ipo_items(client)
+    if not items and is_hkex_new_listing_info(final_url):
+        items = extract_hkex_main_board_items(html, final_url)
 
     if items:
         await fill_missing_issuer_full_name(items)
