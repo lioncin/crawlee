@@ -1,6 +1,6 @@
-const backendUrl = 'http://127.0.0.1:8765/fetch';
-const uploadBackendUrl = 'http://127.0.0.1:8765/upload/image';
-const recognizeBackendUrl = 'http://127.0.0.1:8765/issuer/recognize';
+const backendUrl = '/crawlee-api/fetch';
+const uploadBackendUrl = '/crawlee-api/upload/image';
+const recognizeBackendUrl = '/crawlee-api/issuer/recognize';
 
 const urlSelect = document.getElementById('urlSelect');
 const customUrl = document.getElementById('customUrl');

@@ -1,4 +1,4 @@
-const backendUrl = 'http://127.0.0.1:8765/results/mysql';
+  const backendUrl = '/crawlee-api/results/mysql';
 
 const statusText = document.getElementById('statusText');
 const resultTables = document.getElementById('resultTables');
