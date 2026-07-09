@@ -16,12 +16,40 @@
     <main class="page">
       <section class="panel hero">
         <p class="kicker">Data Console</p>
-        <h1>分析结果</h1>      </section>
+        <h1>分析结果</h1>
+      </section>
+
+      <section class="panel ai-toolbar">
+        <div class="ai-toolbar-inner">
+          <h2>AI分析</h2>
+          <button id="aiAnalyzeBtn" type="button">AI分析</button>
+          <span id="aiStatusText" class="status"></span>
+        </div>
+      </section>
+
+      <section class="panel ai-result compact-ai-result">
+        <h2>AI分析结果</h2>
+        <div class="ai-result-controls">
+          <input id="aiCompanySearch" class="ai-filter-input" type="text" placeholder="按公司名搜索" />
+          <select id="aiGradeFilter" class="ai-filter-select">
+            <option value="ALL">全部等级</option>
+            <option value="A">A级</option>
+            <option value="B">B级</option>
+            <option value="C">C级</option>
+            <option value="D">D级</option>
+          </select>
+          <button id="aiExportCsvBtn" type="button" class="ai-export-btn">导出CSV</button>
+          <span id="aiFilterSummary" class="ai-filter-summary"></span>
+        </div>
+        <div id="aiResultBoard" class="ai-result-board">
+          <p class="empty">点击上方 AI分析 按钮后显示结果</p>
+        </div>
+      </section>
 
       <section class="panel result">
         <div class="result-head">
           <h2>查询结果</h2>
-          <span id="statusText" class="status">等待加载</span>
+          <span id="statusText" class="status"></span>
         </div>
         <div id="resultTables" class="result-tables"></div>
       </section>

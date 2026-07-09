@@ -534,3 +534,59 @@ def save_issuer_recognition_result(
         "item_patch": patch,
         "company_info": company_info,
     }
+
+
+def load_ai_analysis_candidates(limit: int = 2000) -> list[dict[str, Any]]:
+    cfg = _mysql_config()
+    safe_limit = max(1, min(int(limit), 5000))
+
+    with pymysql.connect(**cfg) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  ei.item_id,
+                  ei.title,
+                  ei.issuer_full_name,
+                  ei.item_date,
+                  ei.extra,
+                  sc.source_url,
+                  cr.task_time
+                FROM entity_item ei
+                JOIN crawl_record cr ON cr.record_id = ei.record_id
+                JOIN source_config sc ON sc.source_id = cr.source_id
+                ORDER BY COALESCE(ei.item_date, DATE(cr.task_time)) DESC, ei.updated_at DESC, ei.item_id DESC
+                LIMIT %s
+                """,
+                (safe_limit,),
+            )
+            rows = cur.fetchall() or []
+
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        extra = _loads_json(row.get("extra"))
+        extra_obj = extra if isinstance(extra, dict) else {}
+
+        company_info: dict[str, Any] = {}
+        ai_recognition = extra_obj.get("ai_recognition")
+        if isinstance(ai_recognition, dict) and isinstance(ai_recognition.get("company_info"), dict):
+            company_info = ai_recognition.get("company_info") or {}
+        elif isinstance(extra_obj.get("ai_company_info"), dict):
+            company_info = extra_obj.get("ai_company_info") or {}
+        elif isinstance(extra_obj.get("company_info"), dict):
+            company_info = extra_obj.get("company_info") or {}
+
+        item_date = row.get("item_date")
+        result.append(
+            {
+                "item_id": int(row.get("item_id") or 0),
+                "source_url": str(row.get("source_url") or ""),
+                "title": str(row.get("title") or ""),
+                "issuer_full_name": str(row.get("issuer_full_name") or "").strip(),
+                "item_date": item_date.isoformat() if item_date else "",
+                "company_info": company_info,
+                "extra": extra_obj,
+            }
+        )
+
+    return result

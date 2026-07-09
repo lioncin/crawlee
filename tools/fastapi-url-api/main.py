@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from llm_client import LLMClientError, chat_completion, extract_issuer_names_from_titles, recognize_company_from_images
-from mysql_store import load_latest_results_from_mysql, save_issuer_recognition_result, store_fetch_result
+from mysql_store import load_ai_analysis_candidates, load_latest_results_from_mysql, save_issuer_recognition_result, store_fetch_result
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -692,3 +692,344 @@ async def get_results_from_mysql(source_url: str | None = None, limit: int = 20)
         return data
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to query results from MySQL: {exc}") from exc
+
+
+GRADE_ORDER = ["A", "B", "C", "D"]
+GRADE_PRIORITY = {grade: idx for idx, grade in enumerate(GRADE_ORDER)}
+_LINK_KEY_TOKENS = ("url", "link", "href", "website", "site", "官网", "链接", "网址")
+_NOISY_KEY_TOKENS = ("html", "raw_text", "full_ocr_text", "ocr", "image", "screenshot")
+_PHONE_KEY_TOKENS = ("phone", "tel", "mobile", "telephone", "联系电话", "电话", "手机")
+_EMAIL_KEY_TOKENS = ("email", "mail", "邮箱")
+_CONTACT_KEY_TOKENS = ("contact", "联系人", "person", "manager", "负责人", "对接")
+
+
+def _looks_like_link_value(value: str) -> bool:
+    s = str(value or "").strip().lower()
+    return s.startswith("http://") or s.startswith("https://") or s.startswith("www.")
+
+
+def _is_link_key(key: str) -> bool:
+    lowered = str(key or "").strip().lower()
+    return any(token in lowered for token in _LINK_KEY_TOKENS)
+
+
+def _is_noisy_key(key: str) -> bool:
+    lowered = str(key or "").strip().lower()
+    return any(token in lowered for token in _NOISY_KEY_TOKENS)
+
+
+def _strip_link_and_noise_fields(value: object) -> object:
+    if isinstance(value, dict):
+        cleaned: dict[str, object] = {}
+        for key, val in value.items():
+            key_text = str(key)
+            if _is_link_key(key_text) or _is_noisy_key(key_text):
+                continue
+            nested = _strip_link_and_noise_fields(val)
+            if nested in (None, "", [], {}):
+                continue
+            cleaned[key_text] = nested
+        return cleaned
+
+    if isinstance(value, list):
+        arr = []
+        for item in value:
+            nested = _strip_link_and_noise_fields(item)
+            if nested in (None, "", [], {}):
+                continue
+            arr.append(nested)
+        return arr
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return ""
+        if _looks_like_link_value(text):
+            return ""
+        if len(text) > 1000:
+            return text[:1000]
+        return text
+
+    return value
+
+
+def _iter_scalar_fields(value: object, prefix: str = "") -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+
+    if isinstance(value, dict):
+        for key, val in value.items():
+            key_text = str(key)
+            path = f"{prefix}.{key_text}" if prefix else key_text
+            rows.extend(_iter_scalar_fields(val, path))
+        return rows
+
+    if isinstance(value, list):
+        for idx, item in enumerate(value):
+            path = f"{prefix}[{idx}]" if prefix else f"[{idx}]"
+            rows.extend(_iter_scalar_fields(item, path))
+        return rows
+
+    if value is None:
+        return rows
+
+    text = str(value).strip()
+    if text:
+        rows.append((prefix, text))
+    return rows
+
+
+def _find_first_value_by_tokens(value: object, key_tokens: tuple[str, ...], value_check=None) -> str:
+    for path, text in _iter_scalar_fields(value):
+        lower_path = path.lower()
+        if not any(token in lower_path for token in key_tokens):
+            continue
+        if _looks_like_link_value(text):
+            continue
+        if value_check and not value_check(text):
+            continue
+        return text
+    return ""
+
+
+def _guess_phone(value: object) -> str:
+    phone = _find_first_value_by_tokens(
+        value,
+        _PHONE_KEY_TOKENS,
+        value_check=lambda x: bool(re.search(r"\d{6,}", x)),
+    )
+    return phone[:80] if phone else ""
+
+
+def _guess_email(value: object) -> str:
+    email = _find_first_value_by_tokens(
+        value,
+        _EMAIL_KEY_TOKENS,
+        value_check=lambda x: "@" in x,
+    )
+    return email[:120] if email else ""
+
+
+def _guess_contact_name(value: object) -> str:
+    contact = _find_first_value_by_tokens(value, _CONTACT_KEY_TOKENS)
+    return contact[:80] if contact else ""
+
+
+def _pick_company_name(raw: dict[str, object], company_info: dict[str, object]) -> str:
+    issuer_name = str(raw.get("issuer_full_name") or "").strip()
+    if issuer_name:
+        return issuer_name
+
+    for key in ("issuer_full_name", "company_name", "name", "company", "企业名称", "公司名称"):
+        val = company_info.get(key)
+        if isinstance(val, str) and val.strip() and not _looks_like_link_value(val):
+            return val.strip()
+
+    title = str(raw.get("title") or "").strip()
+    return title[:80] if title else ""
+
+
+def _strip_code_fence(text: str) -> str:
+    content = (text or "").strip()
+    if not content.startswith("```"):
+        return content
+
+    lines = content.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _parse_json_array(content: str) -> list[dict[str, object]]:
+    cleaned = _strip_code_fence(content)
+
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, list):
+            return [row for row in data if isinstance(row, dict)]
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"\[(.*)\]", cleaned, flags=re.DOTALL)
+    if not match:
+        return []
+
+    try:
+        data = json.loads(f"[{match.group(1)}]")
+    except json.JSONDecodeError:
+        return []
+
+    if not isinstance(data, list):
+        return []
+    return [row for row in data if isinstance(row, dict)]
+
+
+def _normalize_grade(raw_grade: object) -> str:
+    grade = str(raw_grade or "").strip().upper()
+    return grade if grade in GRADE_PRIORITY else "D"
+
+
+def _build_lead_analysis_prompt(rows: list[dict[str, object]]) -> str:
+    rows_payload = [
+        {
+            "idx": row["idx"],
+            "company_name": row["company_name"],
+            "title": row["title"],
+            "company_info": row["company_info"],
+            "extra": row["extra"],
+        }
+        for row in rows
+    ]
+
+    return (
+        "你是B2B软件销售线索分析专家。我们公司销售 minitab 软件。\n"
+        "请根据输入公司数据，给每家公司评估采购 minitab 的成交可能性等级。\n"
+        "业务背景：\n"
+        "1) 大中型公司更可能采购，小型公司通常不会；\n"
+        "2) 上市/拟上市公司对合规和流程规范要求更高，潜在需求更强；\n"
+        "3) 可参考社保缴费人数、组织规模、行业属性、信息化成熟度、规范化诉求；\n"
+        "4) 也请发挥你的分析能力补充其他合理判断维度。\n\n"
+        "输出要求：\n"
+        "1) 仅输出 JSON 数组，不要任何额外说明；\n"
+        "2) 每个元素格式：{\"idx\":数字,\"grade\":\"A|B|C|D\",\"reason\":\"不超过80字\"};\n"
+        "3) 必须覆盖输入中的每个 idx；\n"
+        "4) A=需求最强，D=需求最弱。\n\n"
+        f"输入数据：\n{json.dumps(rows_payload, ensure_ascii=False)}"
+    )
+
+
+@app.post("/analysis/lead-score")
+async def analysis_lead_score() -> dict[str, object]:
+    try:
+        candidates = await asyncio.to_thread(load_ai_analysis_candidates, 2500)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load candidates from MySQL: {exc}") from exc
+
+    if not candidates:
+        return {
+            "summary": {
+                "total": 0,
+                "chunk_size": 0,
+                "chunks": 0,
+                "counts": {grade: 0 for grade in GRADE_ORDER},
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            "groups": {grade: [] for grade in GRADE_ORDER},
+        }
+
+    prepared_rows: list[dict[str, object]] = []
+    for idx, item in enumerate(candidates):
+        company_info_obj = item.get("company_info") if isinstance(item.get("company_info"), dict) else {}
+        extra_obj = item.get("extra") if isinstance(item.get("extra"), dict) else {}
+
+        cleaned_company_info = _strip_link_and_noise_fields(company_info_obj)
+        cleaned_extra = _strip_link_and_noise_fields(extra_obj)
+
+        if not isinstance(cleaned_company_info, dict):
+            cleaned_company_info = {}
+        if not isinstance(cleaned_extra, dict):
+            cleaned_extra = {}
+
+        company_name = _pick_company_name(item, cleaned_company_info)
+        title = str(item.get("title") or "").strip()
+
+        contact_name = _guess_contact_name(cleaned_company_info) or _guess_contact_name(cleaned_extra)
+        phone = _guess_phone(cleaned_company_info) or _guess_phone(cleaned_extra)
+        email = _guess_email(cleaned_company_info) or _guess_email(cleaned_extra)
+
+        prepared_rows.append(
+            {
+                "idx": idx,
+                "item_id": int(item.get("item_id") or 0),
+                "company_name": company_name,
+                "title": title,
+                "item_date": str(item.get("item_date") or ""),
+                "contact_name": contact_name,
+                "phone": phone,
+                "email": email,
+                "company_info": cleaned_company_info,
+                "extra": cleaned_extra,
+            }
+        )
+
+    chunk_size = 25
+    chunk_count = (len(prepared_rows) + chunk_size - 1) // chunk_size
+
+    analysis_by_idx: dict[int, dict[str, object]] = {}
+
+    for chunk_start in range(0, len(prepared_rows), chunk_size):
+        chunk = prepared_rows[chunk_start : chunk_start + chunk_size]
+        prompt = _build_lead_analysis_prompt(chunk)
+
+        try:
+            llm_text = await chat_completion(prompt, timeout_seconds=120.0)
+            parsed_rows = _parse_json_array(llm_text)
+        except LLMClientError:
+            parsed_rows = []
+
+        for row in parsed_rows:
+            idx_val = row.get("idx")
+            if not isinstance(idx_val, int):
+                continue
+            if idx_val < 0 or idx_val >= len(prepared_rows):
+                continue
+
+            analysis_by_idx[idx_val] = {
+                "grade": _normalize_grade(row.get("grade")),
+                "reason": str(row.get("reason") or "").strip()[:120],
+            }
+
+        for item in chunk:
+            idx_val = int(item["idx"])
+            if idx_val in analysis_by_idx:
+                continue
+            analysis_by_idx[idx_val] = {
+                "grade": "D",
+                "reason": "当前信息不足，优先级较低",
+            }
+
+    final_rows: list[dict[str, object]] = []
+    for row in prepared_rows:
+        idx_val = int(row["idx"])
+        scored = analysis_by_idx.get(idx_val) or {"grade": "D", "reason": "当前信息不足，优先级较低"}
+
+        final_rows.append(
+            {
+                "grade": _normalize_grade(scored.get("grade")),
+                "company_name": str(row.get("company_name") or ""),
+                "title": str(row.get("title") or ""),
+                "contact_name": str(row.get("contact_name") or ""),
+                "phone": str(row.get("phone") or ""),
+                "email": str(row.get("email") or ""),
+                "reason": str(scored.get("reason") or "").strip()[:120],
+                "item_date": str(row.get("item_date") or ""),
+            }
+        )
+
+    final_rows.sort(
+        key=lambda x: (
+            GRADE_PRIORITY.get(str(x.get("grade") or "D"), 3),
+            str(x.get("item_date") or ""),
+            str(x.get("company_name") or ""),
+        ),
+        reverse=False,
+    )
+
+    groups: dict[str, list[dict[str, object]]] = {grade: [] for grade in GRADE_ORDER}
+    for row in final_rows:
+        grade = _normalize_grade(row.get("grade"))
+        groups[grade].append(row)
+
+    counts = {grade: len(groups[grade]) for grade in GRADE_ORDER}
+
+    return {
+        "summary": {
+            "total": len(final_rows),
+            "chunk_size": chunk_size,
+            "chunks": chunk_count,
+            "counts": counts,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        "groups": groups,
+    }
