@@ -36,6 +36,7 @@ FIXED_URLS = [
     "https://www.szse.cn/disclosure/notice/company/index.html",
     "https://www.sse.com.cn/listing/renewal/ipo/",
     "https://www2.hkexnews.hk/New-Listings/New-Listing-Information/Main-Board?sc_lang=zh-HK",
+    "https://www.cninfo.com.cn/new/index",
 ]
 
 OSS_ENDPOINT = os.getenv("OSS_ENDPOINT", "https://oss-cn-hangzhou.aliyuncs.com")
@@ -112,6 +113,11 @@ _HKEX_ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
 _HKEX_CELL_RE = re.compile(r"<td\b[^>]*>(.*?)</td>", re.IGNORECASE | re.DOTALL)
 _HKEX_LINK_RE = re.compile(r"href\s*=\s*[\"\x27]([^\"\x27]+)[\"\x27]", re.IGNORECASE)
 _HKEX_DATE_IN_URL_RE = re.compile(r"/(20[0-9]{2})/([01][0-9])([0-3][0-9])/")
+_CNINFO_QUICK_TABLE_RE = re.compile(
+    r"<table[^>]*class=\"[^\"]*jc-table3[^\"]*\"[^>]*>.*?<thead>.*?<th>\s*代码\s*</th>.*?<th>\s*简称\s*</th>.*?<th>\s*公告标题\s*</th>.*?<th[^>]*>\s*日期\s*</th>.*?</thead>.*?<tbody>(.*?)</tbody>",
+    re.IGNORECASE | re.DOTALL,
+)
+_CNINFO_ANNOUNCEMENT_DATE_RE = re.compile(r"[?&]announcementTime=([0-9]{4}-[0-9]{2}-[0-9]{2})")
 
 _ISSUE_MARKET_MAP = {
     "1": "科创板",
@@ -196,6 +202,10 @@ def is_sse_listing_ipo(url: str) -> bool:
 def is_hkex_new_listing_info(url: str) -> bool:
     parsed = urlparse(url)
     return parsed.netloc.endswith("hkexnews.hk") and parsed.path.startswith("/New-Listings/New-Listing-Information/Main-Board")
+
+def is_cninfo_index(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.netloc.endswith("cninfo.com.cn") and parsed.path.startswith("/new/index")
 
 
 def is_valid_http_url(url: str) -> bool:
@@ -295,6 +305,86 @@ def extract_hkex_main_board_items(html: str, base_url: str) -> list[NoticeItem]:
                         update_date=updated_date or None,
                     )
                 )
+
+    return items
+
+def parse_cninfo_date_from_detail_url(url: str) -> str:
+    match = _CNINFO_ANNOUNCEMENT_DATE_RE.search(url)
+    if not match:
+        return ""
+    return match.group(1)
+
+
+def normalize_cninfo_mmdd(mmdd: str, default_year: int) -> str:
+    value = mmdd.strip()
+    if not value:
+        return ""
+    full = normalize_date_yyyymmdd(value)
+    if full != value and re.match(r"^\d{4}-\d{2}-\d{2}$", full):
+        return full
+
+    m = re.match(r"^([0-1]?\d)-([0-3]?\d)$", value)
+    if not m:
+        return value
+    month, day = m.groups()
+    return f"{default_year:04d}-{int(month):02d}-{int(day):02d}"
+
+
+def extract_cninfo_latest_notice_items(html: str, base_url: str) -> list[NoticeItem]:
+    table_match = _CNINFO_QUICK_TABLE_RE.search(html)
+    if not table_match:
+        return []
+
+    rows_html = table_match.group(1)
+    rows = _HKEX_ROW_RE.findall(rows_html)
+    current_year = datetime.now(timezone.utc).year
+
+    items: list[NoticeItem] = []
+    seen_links: set[str] = set()
+
+    for row_html in rows:
+        cells = _HKEX_CELL_RE.findall(row_html)
+        if len(cells) < 4:
+            continue
+
+        stock_code = clean_html_fragment(cells[0])
+        stock_name = clean_html_fragment(cells[1])
+        title = clean_html_fragment(cells[2])
+        date_text = clean_html_fragment(cells[3])
+
+        detail_url = ""
+        for raw_href in _HKEX_LINK_RE.findall(cells[2]):
+            href = unescape(raw_href).strip()
+            if "/new/disclosure/detail" not in href:
+                continue
+            detail_url = urljoin(base_url, href)
+            break
+
+        if not detail_url or detail_url in seen_links:
+            continue
+        seen_links.add(detail_url)
+
+        date = parse_cninfo_date_from_detail_url(detail_url)
+        if not date:
+            date = normalize_cninfo_mmdd(date_text, current_year)
+
+        display_name = stock_name or stock_code or "未知公司"
+        if stock_code:
+            normalized_title = f"{display_name}({stock_code}) {title}"
+        else:
+            normalized_title = f"{display_name} {title}"
+
+        items.append(
+            NoticeItem(
+                date=date,
+                title=normalized_title,
+                url=detail_url,
+                issuer_full_name=stock_name or None,
+                board="巨潮资讯网",
+                audit_status="最新公告",
+                update_date=date or None,
+            )
+        )
 
     return items
 
@@ -418,6 +508,8 @@ async def fetch_one_url(
         items = await fetch_sse_ipo_items(client)
     if not items and is_hkex_new_listing_info(final_url):
         items = extract_hkex_main_board_items(html, final_url)
+    if not items and is_cninfo_index(final_url):
+        items = extract_cninfo_latest_notice_items(html, final_url)
 
     if items:
         await fill_missing_issuer_full_name(items)

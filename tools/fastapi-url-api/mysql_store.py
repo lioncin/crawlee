@@ -46,6 +46,8 @@ def _infer_source_type(source_url: str) -> str:
         return "szse"
     if "hkexnews.hk" in u:
         return "hkex"
+    if "cninfo.com.cn" in u:
+        return "cninfo"
     return "custom"
 
 
