@@ -593,6 +593,36 @@ async function loadResults() {
     }
 }
 
-bindAiAnalyzeEvent();
-bindAiFilterEvents();
-loadResults();
+async function loadSavedAiAnalysis() {
+    try {
+        const response = await fetch(aiAnalysisUrl, { method: "GET" });
+        if (!response.ok) {
+            return;
+        }
+
+        const text = await response.text();
+        let parsed = {};
+        try {
+            parsed = text ? JSON.parse(text) : {};
+        } catch {
+            return;
+        }
+
+        const total = Number(parsed?.summary?.total || 0);
+        if (total > 0) {
+            renderAiAnalysis(parsed);
+            setAiStatus("已加载历史结果", "ok");
+        }
+    } catch {
+        // Keep UI quiet on first-load historical query failures.
+    }
+}
+
+async function initPage() {
+    bindAiAnalyzeEvent();
+    bindAiFilterEvents();
+    await loadSavedAiAnalysis();
+    await loadResults();
+}
+
+initPage();

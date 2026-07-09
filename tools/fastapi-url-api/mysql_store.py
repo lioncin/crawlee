@@ -590,3 +590,158 @@ def load_ai_analysis_candidates(limit: int = 2000) -> list[dict[str, Any]]:
         )
 
     return result
+
+
+def _normalize_lead_grade(value: Any) -> str:
+    grade = str(value or "").strip().upper()
+    return grade if grade in {"A", "B", "C", "D"} else "D"
+
+
+def replace_ai_analysis_results(summary: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    cfg = _mysql_config()
+
+    total_count = int(summary.get("total") or len(rows) or 0)
+    chunk_size = int(summary.get("chunk_size") or 0)
+    chunk_count = int(summary.get("chunks") or 0)
+    generated_at_raw = str(summary.get("generated_at") or "").strip()
+
+    generated_at = datetime.now()
+    if generated_at_raw:
+        try:
+            generated_at = datetime.fromisoformat(generated_at_raw.replace("Z", "+00:00"))
+        except ValueError:
+            generated_at = datetime.now()
+
+    with pymysql.connect(**cfg) as conn:
+        with conn.cursor() as cur:
+            # User requested replace semantics: clear old AI analysis then insert new.
+            cur.execute("DELETE FROM ai_analysis_result")
+            cur.execute("DELETE FROM ai_analysis_run")
+
+            cur.execute(
+                """
+                INSERT INTO ai_analysis_run (
+                  total_count, chunk_size, chunk_count, generated_at, summary_payload
+                ) VALUES (%s, %s, %s, %s, %s)
+                """,
+                (
+                    total_count,
+                    chunk_size,
+                    chunk_count,
+                    generated_at,
+                    _to_json(summary),
+                ),
+            )
+            run_id = int(cur.lastrowid)
+
+            for idx, row in enumerate(rows):
+                cur.execute(
+                    """
+                    INSERT INTO ai_analysis_result (
+                      run_id, grade, company_name, contact_name, phone, email, reason, title, item_date, sort_order
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        run_id,
+                        _normalize_lead_grade(row.get("grade")),
+                        (str(row.get("company_name") or "").strip() or None),
+                        (str(row.get("contact_name") or "").strip() or None),
+                        (str(row.get("phone") or "").strip() or None),
+                        (str(row.get("email") or "").strip() or None),
+                        (str(row.get("reason") or "").strip() or None),
+                        (str(row.get("title") or "").strip() or None),
+                        _parse_date(row.get("item_date")),
+                        idx,
+                    ),
+                )
+
+        conn.commit()
+
+    return {
+        "run_id": run_id,
+        "total": total_count,
+    }
+
+
+def load_latest_ai_analysis_results() -> dict[str, Any]:
+    cfg = _mysql_config()
+
+    with pymysql.connect(**cfg) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT run_id, total_count, chunk_size, chunk_count, generated_at, summary_payload
+                FROM ai_analysis_run
+                ORDER BY run_id DESC
+                LIMIT 1
+                """
+            )
+            run_row = cur.fetchone()
+            if not run_row:
+                return {
+                    "summary": {
+                        "total": 0,
+                        "chunk_size": 0,
+                        "chunks": 0,
+                        "counts": {"A": 0, "B": 0, "C": 0, "D": 0},
+                        "generated_at": "",
+                    },
+                    "groups": {"A": [], "B": [], "C": [], "D": []},
+                }
+
+            run_id = int(run_row.get("run_id") or 0)
+            summary_payload = _loads_json(run_row.get("summary_payload"))
+
+            cur.execute(
+                """
+                SELECT grade, company_name, contact_name, phone, email, reason, title, item_date
+                FROM ai_analysis_result
+                WHERE run_id = %s
+                ORDER BY sort_order ASC, id ASC
+                """,
+                (run_id,),
+            )
+            rows = cur.fetchall() or []
+
+    groups: dict[str, list[dict[str, Any]]] = {"A": [], "B": [], "C": [], "D": []}
+    for row in rows:
+        grade = _normalize_lead_grade(row.get("grade"))
+        item_date = row.get("item_date")
+        groups[grade].append(
+            {
+                "grade": grade,
+                "company_name": str(row.get("company_name") or ""),
+                "contact_name": str(row.get("contact_name") or ""),
+                "phone": str(row.get("phone") or ""),
+                "email": str(row.get("email") or ""),
+                "reason": str(row.get("reason") or ""),
+                "title": str(row.get("title") or ""),
+                "item_date": item_date.isoformat() if item_date else "",
+            }
+        )
+
+    counts = {grade: len(groups[grade]) for grade in ("A", "B", "C", "D")}
+    generated_at_obj = run_row.get("generated_at")
+    generated_at = generated_at_obj.isoformat() if generated_at_obj else ""
+
+    summary = {
+        "total": int(run_row.get("total_count") or len(rows)),
+        "chunk_size": int(run_row.get("chunk_size") or 0),
+        "chunks": int(run_row.get("chunk_count") or 0),
+        "counts": counts,
+        "generated_at": generated_at,
+    }
+
+    if isinstance(summary_payload, dict):
+        summary = {
+            "total": int(summary_payload.get("total") or summary["total"]),
+            "chunk_size": int(summary_payload.get("chunk_size") or summary["chunk_size"]),
+            "chunks": int(summary_payload.get("chunks") or summary["chunks"]),
+            "counts": counts,
+            "generated_at": str(summary_payload.get("generated_at") or summary["generated_at"]),
+        }
+
+    return {
+        "summary": summary,
+        "groups": groups,
+    }

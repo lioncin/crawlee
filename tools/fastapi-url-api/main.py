@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from llm_client import LLMClientError, chat_completion, extract_issuer_names_from_titles, recognize_company_from_images
-from mysql_store import load_ai_analysis_candidates, load_latest_results_from_mysql, save_issuer_recognition_result, store_fetch_result
+from mysql_store import load_ai_analysis_candidates, load_latest_ai_analysis_results, load_latest_results_from_mysql, replace_ai_analysis_results, save_issuer_recognition_result, store_fetch_result
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -899,6 +899,15 @@ def _build_lead_analysis_prompt(rows: list[dict[str, object]]) -> str:
     )
 
 
+
+@app.get("/analysis/lead-score")
+async def get_analysis_lead_score() -> dict[str, object]:
+    try:
+        return await asyncio.to_thread(load_latest_ai_analysis_results)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to query AI analysis results from MySQL: {exc}") from exc
+
+
 @app.post("/analysis/lead-score")
 async def analysis_lead_score() -> dict[str, object]:
     try:
@@ -907,7 +916,7 @@ async def analysis_lead_score() -> dict[str, object]:
         raise HTTPException(status_code=500, detail=f"Failed to load candidates from MySQL: {exc}") from exc
 
     if not candidates:
-        return {
+        empty_payload = {
             "summary": {
                 "total": 0,
                 "chunk_size": 0,
@@ -917,6 +926,11 @@ async def analysis_lead_score() -> dict[str, object]:
             },
             "groups": {grade: [] for grade in GRADE_ORDER},
         }
+        try:
+            await asyncio.to_thread(replace_ai_analysis_results, empty_payload["summary"], [])
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to replace AI analysis results in MySQL: {exc}") from exc
+        return empty_payload
 
     prepared_rows: list[dict[str, object]] = []
     for idx, item in enumerate(candidates):
@@ -1023,7 +1037,7 @@ async def analysis_lead_score() -> dict[str, object]:
 
     counts = {grade: len(groups[grade]) for grade in GRADE_ORDER}
 
-    return {
+    response_payload = {
         "summary": {
             "total": len(final_rows),
             "chunk_size": chunk_size,
@@ -1033,3 +1047,10 @@ async def analysis_lead_score() -> dict[str, object]:
         },
         "groups": groups,
     }
+
+    try:
+        await asyncio.to_thread(replace_ai_analysis_results, response_payload["summary"], final_rows)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to replace AI analysis results in MySQL: {exc}") from exc
+
+    return response_payload
