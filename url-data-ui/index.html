@@ -17,34 +17,8 @@
       <section class="panel hero">
         <p class="kicker">Data Console</p>
         <h1>交易所 URL 查询与结果展示</h1>
-        <p class="subtitle">点击“查看”后会 POST 到 <code>http://127.0.0.1:8765/fetch</code>，并以表格展示查询结果。</p>
       </section>
-
-      <section class="panel query-box">
-        <label for="urlSelect">选择查询目标</label>
-        <div class="input-grid">
-          <select id="urlSelect">
-            <option value="https://www.sse.com.cn/listing/renewal/ipo/">上交所 IPO 列表</option>
-            <option value="https://www.szse.cn/disclosure/notice/company/index.html">深交所公告</option>
-            <option value="*">全部（*）</option>
-            <option value="custom">自定义 URL</option>
-          </select>
-          <input
-            id="customUrl"
-            type="url"
-            placeholder="输入其他 URL，例如 https://example.com/data"
-            disabled
-          />
-          <button id="queryBtn" type="button">查看</button>
-        </div>
-        <p class="hint">当选择“自定义 URL”时，会使用输入框内容作为请求参数 <code>url</code>。</p>
-      </section>
-
-      <section class="panel current-url">
-        <h2>本次请求 URL 参数</h2>
-        <code id="currentUrl">尚未查询</code>
-      </section>
-
+      <button id="queryBtn" type="button">查看</button>
       <section class="panel result">
         <div class="result-head">
           <h2>查询结果</h2>

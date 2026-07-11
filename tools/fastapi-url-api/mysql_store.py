@@ -638,8 +638,8 @@ def replace_ai_analysis_results(summary: dict[str, Any], rows: list[dict[str, An
                 cur.execute(
                     """
                     INSERT INTO ai_analysis_result (
-                      run_id, grade, company_name, contact_name, phone, email, reason, title, item_date, sort_order
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      run_id, grade, company_name, contact_name, phone, email, employee_count, operating_revenue, insured_count, reason, title, item_date, sort_order
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         run_id,
@@ -648,6 +648,9 @@ def replace_ai_analysis_results(summary: dict[str, Any], rows: list[dict[str, An
                         (str(row.get("contact_name") or "").strip() or None),
                         (str(row.get("phone") or "").strip() or None),
                         (str(row.get("email") or "").strip() or None),
+                        (str(row.get("employee_count") or "").strip() or None),
+                        (str(row.get("operating_revenue") or "").strip() or None),
+                        (str(row.get("insured_count") or "").strip() or None),
                         (str(row.get("reason") or "").strip() or None),
                         (str(row.get("title") or "").strip() or None),
                         _parse_date(row.get("item_date")),
@@ -694,7 +697,7 @@ def load_latest_ai_analysis_results() -> dict[str, Any]:
 
             cur.execute(
                 """
-                SELECT grade, company_name, contact_name, phone, email, reason, title, item_date
+                SELECT grade, company_name, contact_name, phone, email, employee_count, operating_revenue, insured_count, reason, title, item_date
                 FROM ai_analysis_result
                 WHERE run_id = %s
                 ORDER BY sort_order ASC, id ASC
@@ -714,6 +717,9 @@ def load_latest_ai_analysis_results() -> dict[str, Any]:
                 "contact_name": str(row.get("contact_name") or ""),
                 "phone": str(row.get("phone") or ""),
                 "email": str(row.get("email") or ""),
+                "employee_count": str(row.get("employee_count") or ""),
+                "operating_revenue": str(row.get("operating_revenue") or ""),
+                "insured_count": str(row.get("insured_count") or ""),
                 "reason": str(row.get("reason") or ""),
                 "title": str(row.get("title") or ""),
                 "item_date": item_date.isoformat() if item_date else "",

@@ -337,15 +337,30 @@ function flattenAiGroups(data) {
     const groups = data?.groups && typeof data.groups === 'object' ? data.groups : {};
     const rows = [];
 
+    const pickFirstNonEmpty = (source, keys) => {
+        for (const key of keys) {
+            const value = source?.[key];
+            if (value !== undefined && value !== null && String(value).trim() !== '') {
+                return String(value).trim();
+            }
+        }
+        return '';
+    };
+
     for (const grade of GRADE_ORDER) {
         const items = Array.isArray(groups[grade]) ? groups[grade] : [];
         for (const item of items) {
             rows.push({
                 grade,
                 company_name: String(item?.company_name ?? '').trim(),
-                contact_name: String(item?.contact_name ?? '').trim(),
-                phone: String(item?.phone ?? '').trim(),
-                email: String(item?.email ?? '').trim(),
+                employee_count: pickFirstNonEmpty(item, ['employee_count', 'staff_count', 'employee_num', 'staff_num']),
+                operating_revenue: pickFirstNonEmpty(item, [
+                    'operating_revenue',
+                    'revenue',
+                    'annual_revenue',
+                    'business_revenue',
+                ]),
+                insured_count: pickFirstNonEmpty(item, ['insured_count', 'insured_num', 'social_security_count']),
                 reason: String(item?.reason ?? '').trim(),
                 title: String(item?.title ?? '').trim(),
                 item_date: String(item?.item_date ?? '').trim(),
@@ -392,9 +407,9 @@ function renderAiRows(rows) {
             (row) => `
       <tr>
         <td>${escapeHtml(row.company_name)}</td>
-        <td>${escapeHtml(row.contact_name)}</td>
-        <td>${escapeHtml(row.phone)}</td>
-        <td>${escapeHtml(row.email)}</td>
+        <td>${escapeHtml(row.employee_count)}</td>
+        <td>${escapeHtml(row.operating_revenue)}</td>
+        <td>${escapeHtml(row.insured_count)}</td>
         <td>${escapeHtml(row.reason)}</td>
       </tr>
     `,
@@ -407,9 +422,9 @@ function renderAiRows(rows) {
           <thead>
             <tr>
               <th>公司名字</th>
-              <th>联系人</th>
-              <th>电话</th>
-              <th>邮箱</th>
+              <th>员工人数</th>
+              <th>营业收入</th>
+              <th>参保人数</th>
               <th>评级理由</th>
             </tr>
           </thead>
@@ -460,12 +475,19 @@ function exportAiCsv() {
         return;
     }
 
-    const header = ['等级', '公司名', '联系人', '电话', '邮箱', '评级理由'];
+    const header = ['等级', '公司名', '员工人数', '营业收入', '参保人数', '评级理由'];
     const lines = [header.map(csvEscape).join(',')];
 
     for (const row of rows) {
         lines.push(
-            [normalizeGrade(row.grade), row.company_name, row.contact_name, row.phone, row.email, row.reason]
+            [
+                normalizeGrade(row.grade),
+                row.company_name,
+                row.employee_count,
+                row.operating_revenue,
+                row.insured_count,
+                row.reason,
+            ]
                 .map(csvEscape)
                 .join(','),
         );

@@ -701,6 +701,9 @@ _NOISY_KEY_TOKENS = ("html", "raw_text", "full_ocr_text", "ocr", "image", "scree
 _PHONE_KEY_TOKENS = ("phone", "tel", "mobile", "telephone", "联系电话", "电话", "手机")
 _EMAIL_KEY_TOKENS = ("email", "mail", "邮箱")
 _CONTACT_KEY_TOKENS = ("contact", "联系人", "person", "manager", "负责人", "对接")
+_EMPLOYEE_COUNT_KEY_TOKENS = ("employee", "staff", "人员", "员工", "职工", "从业")
+_INSURED_COUNT_KEY_TOKENS = ("insured", "insurance", "social_security", "社保", "参保")
+_REVENUE_KEY_TOKENS = ("revenue", "income", "turnover", "营业收入", "营收", "销售额")
 
 
 def _looks_like_link_value(value: str) -> bool:
@@ -812,6 +815,33 @@ def _guess_email(value: object) -> str:
 def _guess_contact_name(value: object) -> str:
     contact = _find_first_value_by_tokens(value, _CONTACT_KEY_TOKENS)
     return contact[:80] if contact else ""
+
+
+def _guess_employee_count(value: object) -> str:
+    employee_count = _find_first_value_by_tokens(
+        value,
+        _EMPLOYEE_COUNT_KEY_TOKENS,
+        value_check=lambda x: bool(re.search(r"\d", x)),
+    )
+    return employee_count[:80] if employee_count else ""
+
+
+def _guess_insured_count(value: object) -> str:
+    insured_count = _find_first_value_by_tokens(
+        value,
+        _INSURED_COUNT_KEY_TOKENS,
+        value_check=lambda x: bool(re.search(r"\d", x)),
+    )
+    return insured_count[:80] if insured_count else ""
+
+
+def _guess_operating_revenue(value: object) -> str:
+    operating_revenue = _find_first_value_by_tokens(
+        value,
+        _REVENUE_KEY_TOKENS,
+        value_check=lambda x: bool(re.search(r"\d", x)),
+    )
+    return operating_revenue[:120] if operating_revenue else ""
 
 
 def _pick_company_name(raw: dict[str, object], company_info: dict[str, object]) -> str:
@@ -951,6 +981,9 @@ async def analysis_lead_score() -> dict[str, object]:
         contact_name = _guess_contact_name(cleaned_company_info) or _guess_contact_name(cleaned_extra)
         phone = _guess_phone(cleaned_company_info) or _guess_phone(cleaned_extra)
         email = _guess_email(cleaned_company_info) or _guess_email(cleaned_extra)
+        employee_count = _guess_employee_count(cleaned_company_info) or _guess_employee_count(cleaned_extra)
+        operating_revenue = _guess_operating_revenue(cleaned_company_info) or _guess_operating_revenue(cleaned_extra)
+        insured_count = _guess_insured_count(cleaned_company_info) or _guess_insured_count(cleaned_extra)
 
         prepared_rows.append(
             {
@@ -962,6 +995,9 @@ async def analysis_lead_score() -> dict[str, object]:
                 "contact_name": contact_name,
                 "phone": phone,
                 "email": email,
+                "employee_count": employee_count,
+                "operating_revenue": operating_revenue,
+                "insured_count": insured_count,
                 "company_info": cleaned_company_info,
                 "extra": cleaned_extra,
             }
@@ -1016,6 +1052,9 @@ async def analysis_lead_score() -> dict[str, object]:
                 "contact_name": str(row.get("contact_name") or ""),
                 "phone": str(row.get("phone") or ""),
                 "email": str(row.get("email") or ""),
+                "employee_count": str(row.get("employee_count") or ""),
+                "operating_revenue": str(row.get("operating_revenue") or ""),
+                "insured_count": str(row.get("insured_count") or ""),
                 "reason": str(scored.get("reason") or "").strip()[:120],
                 "item_date": str(row.get("item_date") or ""),
             }
