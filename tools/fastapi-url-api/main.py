@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import uuid
@@ -22,6 +23,7 @@ from mysql_store import load_ai_analysis_candidates, load_latest_ai_analysis_res
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 app = FastAPI(title="Crawlee URL Result API", version="0.5.0")
+logger = logging.getLogger(__name__)
 
 app.add_middleware(
     CORSMiddleware,
@@ -644,22 +646,49 @@ async def upload_images_to_oss(
 
 @app.post("/issuer/recognize")
 async def recognize_issuer_from_images(payload: IssuerRecognitionRequest) -> dict[str, object]:
+    logger.info(
+        "[issuer/recognize] request source_url=%s notice_url=%s issuer_name=%s image_count=%s timeout=%s",
+        payload.source_url,
+        payload.notice_url,
+        payload.issuer_name,
+        len(payload.image_urls or []),
+        payload.timeout_seconds,
+    )
+
     notice_url = payload.notice_url.strip()
     if not notice_url:
+        logger.warning("[issuer/recognize] reject: empty notice_url")
         raise HTTPException(status_code=422, detail="notice_url must not be empty")
 
     image_urls = [str(u).strip() for u in payload.image_urls if str(u).strip()]
     if not image_urls:
+        logger.warning("[issuer/recognize] reject: empty image_urls after normalize")
         raise HTTPException(status_code=422, detail="image_urls must not be empty")
 
     try:
+        logger.info("[issuer/recognize] start vision recognition")
         recognition = await recognize_company_from_images(image_urls, timeout_seconds=payload.timeout_seconds)
+        logger.info(
+            "[issuer/recognize] vision done model=%s retry_used=%s warning=%s",
+            recognition.get("model"),
+            bool(recognition.get("retry_used")),
+            recognition.get("warning") or "",
+        )
+
+        logger.info("[issuer/recognize] start save_issuer_recognition_result")
         saved = await asyncio.to_thread(
             save_issuer_recognition_result,
             payload.source_url.strip(),
             notice_url,
             payload.issuer_name.strip(),
             recognition,
+        )
+        logger.info(
+            "[issuer/recognize] save done item_id=%s profile_id=%s registry_id=%s certificate_count=%s",
+            saved.get("item_id"),
+            saved.get("company_profile_id"),
+            saved.get("company_registry_profile_id"),
+            saved.get("certificate_count"),
         )
 
         return {
@@ -673,10 +702,13 @@ async def recognize_issuer_from_images(payload: IssuerRecognitionRequest) -> dic
             "image_urls": recognition.get("image_urls") or [],
         }
     except LLMClientError as exc:
+        logger.exception("[issuer/recognize] LLMClientError: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except ValueError as exc:
+        logger.exception("[issuer/recognize] ValueError: %s", exc)
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception("[issuer/recognize] unexpected error: %s", exc)
         raise HTTPException(status_code=500, detail=f"Failed to save recognition result: {exc}") from exc
 
 @app.post("/llm/chat", response_model=LLMChatResponse)

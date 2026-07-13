@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
 import pymysql
+
+logger = logging.getLogger(__name__)
 
 
 def _load_dotenv(env_path: Path) -> None:
@@ -218,76 +221,124 @@ def _upsert_company_profile(cur, item_id: int, source_url: str, notice_url: str,
     if not company_name:
         company_name = _pick_first(parsed, "company_name", "issuer_full_name") or ""
 
-    cur.execute(
-        """
-        INSERT INTO company_profile (
-          source_item_id, company_name, status, brand_logo,
-          stock_code, stock_market,
-          unified_social_credit_code, legal_representative, registered_capital, establishment_date,
-          phone, email, website, address,
-          industry, scale, employees_text, revenue_text,
-          enterprise_score_text, tech_innovation_score_text,
-          tags_json, scores_json, basic_info_json, contact_info_json, business_data_json,
-          ai_summary, raw_payload
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-          source_item_id = VALUES(source_item_id),
-          status = VALUES(status),
-          brand_logo = VALUES(brand_logo),
-          stock_market = VALUES(stock_market),
-          legal_representative = VALUES(legal_representative),
-          registered_capital = VALUES(registered_capital),
-          establishment_date = VALUES(establishment_date),
-          phone = VALUES(phone),
-          email = VALUES(email),
-          website = VALUES(website),
-          address = VALUES(address),
-          industry = VALUES(industry),
-          scale = VALUES(scale),
-          employees_text = VALUES(employees_text),
-          revenue_text = VALUES(revenue_text),
-          enterprise_score_text = VALUES(enterprise_score_text),
-          tech_innovation_score_text = VALUES(tech_innovation_score_text),
-          tags_json = VALUES(tags_json),
-          scores_json = VALUES(scores_json),
-          basic_info_json = VALUES(basic_info_json),
-          contact_info_json = VALUES(contact_info_json),
-          business_data_json = VALUES(business_data_json),
-          ai_summary = VALUES(ai_summary),
-          raw_payload = VALUES(raw_payload),
-          updated_at = CURRENT_TIMESTAMP,
-          id = LAST_INSERT_ID(id)
-        """,
-        (
-            item_id,
-            str(company_name or ""),
-            _pick_first(parsed, "status", "registration_status"),
-            _pick_first(parsed, "brand_logo"),
-            _pick_first(parsed.get("stock_info") if isinstance(parsed.get("stock_info"), dict) else {}, "code", "stock_code"),
-            _pick_first(parsed.get("stock_info") if isinstance(parsed.get("stock_info"), dict) else {}, "market", "stock_market"),
-            _pick_first(basic_info, "unified_social_credit_code"),
-            _pick_first(basic_info, "legal_representative"),
-            _pick_first(basic_info, "registered_capital"),
-            _parse_date(_pick_first(basic_info, "establishment_date")),
-            _pick_first(contact_info, "phone"),
-            _pick_first(contact_info, "email"),
-            _pick_first(contact_info, "website"),
-            _pick_first(contact_info, "address", "registered_address"),
-            _pick_first(business_data, "industry") or _pick_first(basic_info, "industry"),
-            _pick_first(business_data, "scale"),
-            _pick_first(business_data, "employees", "employee_count"),
-            _pick_first(business_data, "revenue", "operating_revenue"),
-            _pick_first(scores, "enterprise_score"),
-            _pick_first(scores, "tech_innovation_score"),
-            _to_json(parsed.get("tags") if isinstance(parsed.get("tags"), list) else []),
-            _to_json(scores),
-            _to_json(basic_info),
-            _to_json(contact_info),
-            _to_json(business_data),
-            _pick_first(parsed, "ai_summary"),
-            _to_json({"source_url": source_url, "notice_url": notice_url, "parsed": parsed}),
-        ),
+    values = (
+        item_id,
+        str(company_name or ""),
+        _pick_first(parsed, "status", "registration_status"),
+        _pick_first(parsed, "brand_logo"),
+        _pick_first(parsed.get("stock_info") if isinstance(parsed.get("stock_info"), dict) else {}, "code", "stock_code"),
+        _pick_first(parsed.get("stock_info") if isinstance(parsed.get("stock_info"), dict) else {}, "market", "stock_market"),
+        _pick_first(basic_info, "unified_social_credit_code"),
+        _pick_first(basic_info, "legal_representative"),
+        _pick_first(basic_info, "registered_capital"),
+        _parse_date(_pick_first(basic_info, "establishment_date")),
+        _pick_first(contact_info, "phone"),
+        _pick_first(contact_info, "email"),
+        _pick_first(contact_info, "website"),
+        _pick_first(contact_info, "address", "registered_address"),
+        _pick_first(business_data, "industry") or _pick_first(basic_info, "industry"),
+        _pick_first(business_data, "scale"),
+        _pick_first(business_data, "employees", "employee_count"),
+        _pick_first(business_data, "revenue", "operating_revenue"),
+        _pick_first(scores, "enterprise_score"),
+        _pick_first(scores, "tech_innovation_score"),
+        _to_json(parsed.get("tags") if isinstance(parsed.get("tags"), list) else []),
+        _to_json(scores),
+        _to_json(basic_info),
+        _to_json(contact_info),
+        _to_json(business_data),
+        _pick_first(parsed, "ai_summary"),
+        _to_json({"source_url": source_url, "notice_url": notice_url, "parsed": parsed}),
     )
+
+    try:
+        cur.execute(
+            """
+            INSERT INTO company_profile (
+              source_item_id, company_name, status, brand_logo,
+              stock_code, stock_market,
+              unified_social_credit_code, legal_representative, registered_capital, establishment_date,
+              phone, email, website, address,
+              industry, scale, employees_text, revenue_text,
+              enterprise_score_text, tech_innovation_score_text,
+              tags_json, scores_json, basic_info_json, contact_info_json, business_data_json,
+              ai_summary, raw_payload
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+              source_item_id = VALUES(source_item_id),
+              status = VALUES(status),
+              brand_logo = VALUES(brand_logo),
+              stock_market = VALUES(stock_market),
+              legal_representative = VALUES(legal_representative),
+              registered_capital = VALUES(registered_capital),
+              establishment_date = VALUES(establishment_date),
+              phone = VALUES(phone),
+              email = VALUES(email),
+              website = VALUES(website),
+              address = VALUES(address),
+              industry = VALUES(industry),
+              scale = VALUES(scale),
+              employees_text = VALUES(employees_text),
+              revenue_text = VALUES(revenue_text),
+              enterprise_score_text = VALUES(enterprise_score_text),
+              tech_innovation_score_text = VALUES(tech_innovation_score_text),
+              tags_json = VALUES(tags_json),
+              scores_json = VALUES(scores_json),
+              basic_info_json = VALUES(basic_info_json),
+              contact_info_json = VALUES(contact_info_json),
+              business_data_json = VALUES(business_data_json),
+              ai_summary = VALUES(ai_summary),
+              raw_payload = VALUES(raw_payload),
+              updated_at = CURRENT_TIMESTAMP,
+              id = LAST_INSERT_ID(id)
+            """,
+            values,
+        )
+    except pymysql.err.OperationalError as exc:
+        if getattr(exc, "args", ()) and len(exc.args) >= 2 and exc.args[0] == 1054 and "source_item_id" in str(exc.args[1]):
+            cur.execute(
+                """
+                INSERT INTO company_profile (
+                  company_name, status, brand_logo,
+                  stock_code, stock_market,
+                  unified_social_credit_code, legal_representative, registered_capital, establishment_date,
+                  phone, email, website, address,
+                  industry, scale, employees_text, revenue_text,
+                  enterprise_score_text, tech_innovation_score_text,
+                  tags_json, scores_json, basic_info_json, contact_info_json, business_data_json,
+                  ai_summary, raw_payload
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                  status = VALUES(status),
+                  brand_logo = VALUES(brand_logo),
+                  stock_market = VALUES(stock_market),
+                  legal_representative = VALUES(legal_representative),
+                  registered_capital = VALUES(registered_capital),
+                  establishment_date = VALUES(establishment_date),
+                  phone = VALUES(phone),
+                  email = VALUES(email),
+                  website = VALUES(website),
+                  address = VALUES(address),
+                  industry = VALUES(industry),
+                  scale = VALUES(scale),
+                  employees_text = VALUES(employees_text),
+                  revenue_text = VALUES(revenue_text),
+                  enterprise_score_text = VALUES(enterprise_score_text),
+                  tech_innovation_score_text = VALUES(tech_innovation_score_text),
+                  tags_json = VALUES(tags_json),
+                  scores_json = VALUES(scores_json),
+                  basic_info_json = VALUES(basic_info_json),
+                  contact_info_json = VALUES(contact_info_json),
+                  business_data_json = VALUES(business_data_json),
+                  ai_summary = VALUES(ai_summary),
+                  raw_payload = VALUES(raw_payload),
+                  updated_at = CURRENT_TIMESTAMP,
+                  id = LAST_INSERT_ID(id)
+                """,
+                values[1:],
+            )
+        else:
+            raise
     return int(cur.lastrowid)
 
 
@@ -396,59 +447,118 @@ def _upsert_company_certificates(cur, company_profile_id: int | None, item_id: i
         if not cert_no:
             continue
 
-        cur.execute(
-            """
-            INSERT INTO company_certificate (
-              company_id, source_item_id,
-              certificate_no, certificate_status,
-              issue_date, expiry_date, first_issue_date, report_date,
-              supervision_count, recertification_count,
-              certification_project, accreditation_mark,
-              certification_scope, certification_basis,
-              covers_multiple_sites, is_sub_certificate, parent_certificate_no,
-              raw_payload
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-              company_id = VALUES(company_id),
-              source_item_id = VALUES(source_item_id),
-              certificate_status = VALUES(certificate_status),
-              issue_date = VALUES(issue_date),
-              expiry_date = VALUES(expiry_date),
-              first_issue_date = VALUES(first_issue_date),
-              report_date = VALUES(report_date),
-              supervision_count = VALUES(supervision_count),
-              recertification_count = VALUES(recertification_count),
-              certification_project = VALUES(certification_project),
-              accreditation_mark = VALUES(accreditation_mark),
-              certification_scope = VALUES(certification_scope),
-              certification_basis = VALUES(certification_basis),
-              covers_multiple_sites = VALUES(covers_multiple_sites),
-              is_sub_certificate = VALUES(is_sub_certificate),
-              parent_certificate_no = VALUES(parent_certificate_no),
-              raw_payload = VALUES(raw_payload),
-              updated_at = CURRENT_TIMESTAMP
-            """,
-            (
-                company_profile_id,
-                item_id,
-                str(cert_no),
-                _pick_first(cert, "certificate_status", "证书状态"),
-                _parse_date(_pick_first(cert, "issue_date", "颁证日期")),
-                _parse_date(_pick_first(cert, "expiry_date", "证书到期日期")),
-                _parse_date(_pick_first(cert, "first_issue_date", "初次获证日期")),
-                _parse_date(_pick_first(cert, "report_date", "信息上报日期")),
-                _to_int(_pick_first(cert, "supervision_count", "监督次数")),
-                _to_int(_pick_first(cert, "recertification_count", "再认证次数")),
-                _pick_first(cert, "certification_project", "认证项目"),
-                _pick_first(cert, "accreditation_mark", "证书使用的认可标识"),
-                _pick_first(cert, "certification_scope", "认证范围/认证覆盖的业务范围"),
-                _pick_first(cert, "certification_basis", "认证依据"),
-                _to_bool01(_pick_first(cert, "covers_multiple_sites", "是否覆盖多场所")),
-                _to_bool01(_pick_first(cert, "is_sub_certificate", "是否是子证书")),
-                _pick_first(cert, "parent_certificate_no", "主认证证书号"),
-                _to_json(cert),
-            ),
+        cert_values = (
+            company_profile_id,
+            item_id,
+            str(cert_no),
+            _pick_first(cert, "certificate_status", "证书状态"),
+            _parse_date(_pick_first(cert, "issue_date", "颁证日期")),
+            _parse_date(_pick_first(cert, "expiry_date", "证书到期日期")),
+            _parse_date(_pick_first(cert, "first_issue_date", "初次获证日期")),
+            _parse_date(_pick_first(cert, "report_date", "信息上报日期")),
+            _to_int(_pick_first(cert, "supervision_count", "监督次数")),
+            _to_int(_pick_first(cert, "recertification_count", "再认证次数")),
+            _pick_first(cert, "certification_project", "认证项目"),
+            _pick_first(cert, "accreditation_mark", "证书使用的认可标识"),
+            _pick_first(cert, "certification_scope", "认证范围/认证覆盖的业务范围"),
+            _pick_first(cert, "certification_basis", "认证依据"),
+            _to_bool01(_pick_first(cert, "covers_multiple_sites", "是否覆盖多场所")),
+            _to_bool01(_pick_first(cert, "is_sub_certificate", "是否是子证书")),
+            _pick_first(cert, "parent_certificate_no", "主认证证书号"),
+            _to_json(cert),
         )
+
+        try:
+            cur.execute(
+                """
+                INSERT INTO company_certificate (
+                  company_id, source_item_id,
+                  certificate_no, certificate_status,
+                  issue_date, expiry_date, first_issue_date, report_date,
+                  supervision_count, recertification_count,
+                  certification_project, accreditation_mark,
+                  certification_scope, certification_basis,
+                  covers_multiple_sites, is_sub_certificate, parent_certificate_no,
+                  raw_payload
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                  company_id = VALUES(company_id),
+                  source_item_id = VALUES(source_item_id),
+                  certificate_status = VALUES(certificate_status),
+                  issue_date = VALUES(issue_date),
+                  expiry_date = VALUES(expiry_date),
+                  first_issue_date = VALUES(first_issue_date),
+                  report_date = VALUES(report_date),
+                  supervision_count = VALUES(supervision_count),
+                  recertification_count = VALUES(recertification_count),
+                  certification_project = VALUES(certification_project),
+                  accreditation_mark = VALUES(accreditation_mark),
+                  certification_scope = VALUES(certification_scope),
+                  certification_basis = VALUES(certification_basis),
+                  covers_multiple_sites = VALUES(covers_multiple_sites),
+                  is_sub_certificate = VALUES(is_sub_certificate),
+                  parent_certificate_no = VALUES(parent_certificate_no),
+                  raw_payload = VALUES(raw_payload),
+                  updated_at = CURRENT_TIMESTAMP
+                """,
+                cert_values,
+            )
+        except pymysql.err.OperationalError as exc:
+            if getattr(exc, "args", ()) and len(exc.args) >= 2 and exc.args[0] == 1054 and "source_item_id" in str(exc.args[1]):
+                logger.warning("[_upsert_company_certificates] source_item_id missing; fallback SQL branch used")
+                cur.execute(
+                    """
+                    INSERT INTO company_certificate (
+                      company_id,
+                      certificate_no, certificate_status,
+                      issue_date, expiry_date, first_issue_date, report_date,
+                      supervision_count, recertification_count,
+                      certification_project, accreditation_mark,
+                      certification_scope, certification_basis,
+                      covers_multiple_sites, is_sub_certificate, parent_certificate_no,
+                      raw_payload
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                      company_id = VALUES(company_id),
+                      certificate_status = VALUES(certificate_status),
+                      issue_date = VALUES(issue_date),
+                      expiry_date = VALUES(expiry_date),
+                      first_issue_date = VALUES(first_issue_date),
+                      report_date = VALUES(report_date),
+                      supervision_count = VALUES(supervision_count),
+                      recertification_count = VALUES(recertification_count),
+                      certification_project = VALUES(certification_project),
+                      accreditation_mark = VALUES(accreditation_mark),
+                      certification_scope = VALUES(certification_scope),
+                      certification_basis = VALUES(certification_basis),
+                      covers_multiple_sites = VALUES(covers_multiple_sites),
+                      is_sub_certificate = VALUES(is_sub_certificate),
+                      parent_certificate_no = VALUES(parent_certificate_no),
+                      raw_payload = VALUES(raw_payload),
+                      updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (
+                        cert_values[0],
+                        cert_values[2],
+                        cert_values[3],
+                        cert_values[4],
+                        cert_values[5],
+                        cert_values[6],
+                        cert_values[7],
+                        cert_values[8],
+                        cert_values[9],
+                        cert_values[10],
+                        cert_values[11],
+                        cert_values[12],
+                        cert_values[13],
+                        cert_values[14],
+                        cert_values[15],
+                        cert_values[16],
+                        cert_values[17],
+                    ),
+                )
+            else:
+                raise
         affected += 1
 
     return affected
