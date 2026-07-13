@@ -355,9 +355,40 @@ function flattenAiGroups(data) {
         return pickFirstNonEmpty(businessData, keys);
     };
 
+    const normalizeCertificates = (item) => {
+        const certs = item?.company_info?.certificates;
+        if (Array.isArray(certs)) {
+            return certs.filter((x) => x && typeof x === 'object');
+        }
+
+        const fallbackCerts = item?.extra?.ai_company_info?.certificates;
+        if (Array.isArray(fallbackCerts)) {
+            return fallbackCerts.filter((x) => x && typeof x === 'object');
+        }
+
+        return [];
+    };
+
+    const formatCertificateNames = (certificates) => {
+        return certificates
+            .map((cert) =>
+                pickFirstNonEmpty(cert, ['certification_project', 'certificate_name', 'name', 'certificate_no']),
+            )
+            .filter(Boolean)
+            .join('；');
+    };
+
+    const formatCertificateIndustries = (certificates) => {
+        return certificates
+            .map((cert) => pickFirstNonEmpty(cert, ['industry', 'certification_scope', 'scope']))
+            .filter(Boolean)
+            .join('；');
+    };
+
     for (const grade of GRADE_ORDER) {
         const items = Array.isArray(groups[grade]) ? groups[grade] : [];
         for (const item of items) {
+            const certificates = normalizeCertificates(item);
             rows.push({
                 grade,
                 company_name: String(item?.company_name ?? '').trim(),
@@ -370,6 +401,11 @@ function flattenAiGroups(data) {
                 insured_count:
                     pickFromBusinessData(item, ['insured_persons']) ||
                     pickFirstNonEmpty(item, ['insured_count', 'insured_num', 'social_security_count']),
+                certificate_names:
+                    pickFirstNonEmpty(item, ['certificate_names']) || formatCertificateNames(certificates),
+                certificate_industries:
+                    pickFirstNonEmpty(item, ['certificate_industries']) ||
+                    formatCertificateIndustries(certificates),
                 reason: String(item?.reason ?? '').trim(),
                 title: String(item?.title ?? '').trim(),
                 item_date: String(item?.item_date ?? '').trim(),
@@ -419,6 +455,8 @@ function renderAiRows(rows) {
         <td>${escapeHtml(row.employee_count)}</td>
         <td>${escapeHtml(row.operating_revenue)}</td>
         <td>${escapeHtml(row.insured_count)}</td>
+        <td>${escapeHtml(row.certificate_names)}</td>
+        <td>${escapeHtml(row.certificate_industries)}</td>
         <td>${escapeHtml(row.reason)}</td>
       </tr>
     `,
@@ -434,6 +472,8 @@ function renderAiRows(rows) {
               <th>员工人数</th>
               <th>营业收入</th>
               <th>参保人数</th>
+              <th>资质证书名称</th>
+              <th>资质证书行业</th>
               <th>评级理由</th>
             </tr>
           </thead>
@@ -484,7 +524,7 @@ function exportAiCsv() {
         return;
     }
 
-    const header = ['等级', '公司名', '员工人数', '营业收入', '参保人数', '评级理由'];
+    const header = ['等级', '公司名', '员工人数', '营业收入', '参保人数', '资质证书名称', '资质证书行业', '评级理由'];
     const lines = [header.map(csvEscape).join(',')];
 
     for (const row of rows) {
@@ -495,6 +535,8 @@ function exportAiCsv() {
                 row.employee_count,
                 row.operating_revenue,
                 row.insured_count,
+                row.certificate_names,
+                row.certificate_industries,
                 row.reason,
             ]
                 .map(csvEscape)

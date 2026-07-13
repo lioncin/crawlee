@@ -800,7 +800,10 @@ def save_issuer_recognition_result(
     parsed = recognition_payload.get("parsed") if isinstance(recognition_payload, dict) else None
     parsed = parsed if isinstance(parsed, dict) else {}
     company_info = parsed.get("company_info") if isinstance(parsed.get("company_info"), dict) else {}
+    company_certificate = parsed.get("company_certificate") if isinstance(parsed.get("company_certificate"), list) else []
     company_info = _normalize_company_info_fields(company_info)
+    if (not isinstance(company_info.get("certificates"), list) or len(company_info.get("certificates") or []) == 0) and company_certificate:
+        company_info["certificates"] = [x for x in company_certificate if isinstance(x, dict)]
 
     # Keep a display patch aligned with UI columns.
     patch: dict[str, Any] = {}
@@ -1071,8 +1074,8 @@ def replace_ai_analysis_results(summary: dict[str, Any], rows: list[dict[str, An
                 cur.execute(
                     """
                     INSERT INTO ai_analysis_result (
-                      run_id, grade, company_name, contact_name, phone, email, employee_count, operating_revenue, insured_count, reason, title, item_date, sort_order
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      run_id, grade, company_name, contact_name, phone, email, employee_count, operating_revenue, insured_count, certificate_names, certificate_industries, reason, title, item_date, sort_order
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         run_id,
@@ -1084,6 +1087,8 @@ def replace_ai_analysis_results(summary: dict[str, Any], rows: list[dict[str, An
                         (str(row.get("employee_count") or "").strip() or None),
                         (str(row.get("operating_revenue") or "").strip() or None),
                         (str(row.get("insured_count") or "").strip() or None),
+                        (str(row.get("certificate_names") or "").strip() or None),
+                        (str(row.get("certificate_industries") or "").strip() or None),
                         (str(row.get("reason") or "").strip() or None),
                         (str(row.get("title") or "").strip() or None),
                         _parse_date(row.get("item_date")),
@@ -1130,7 +1135,7 @@ def load_latest_ai_analysis_results() -> dict[str, Any]:
 
             cur.execute(
                 """
-                SELECT grade, company_name, contact_name, phone, email, employee_count, operating_revenue, insured_count, reason, title, item_date
+                SELECT id, grade, company_name, contact_name, phone, email, employee_count, operating_revenue, insured_count, certificate_names, certificate_industries, reason, title, item_date
                 FROM ai_analysis_result
                 WHERE run_id = %s
                 ORDER BY sort_order ASC, id ASC
@@ -1153,6 +1158,8 @@ def load_latest_ai_analysis_results() -> dict[str, Any]:
                 "employee_count": str(row.get("employee_count") or ""),
                 "operating_revenue": str(row.get("operating_revenue") or ""),
                 "insured_count": str(row.get("insured_count") or ""),
+                "certificate_names": str(row.get("certificate_names") or ""),
+                "certificate_industries": str(row.get("certificate_industries") or ""),
                 "reason": str(row.get("reason") or ""),
                 "title": str(row.get("title") or ""),
                 "item_date": item_date.isoformat() if item_date else "",

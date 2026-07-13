@@ -859,6 +859,56 @@ def _pick_business_data_field(company_info: dict[str, object], *keys: str) -> st
     return ""
 
 
+def _extract_certificate_fields(company_info: dict[str, object]) -> tuple[str, str]:
+    certificates = company_info.get("certificates") if isinstance(company_info.get("certificates"), list) else []
+    if not certificates:
+        return "", ""
+
+    def pick_first_non_empty(cert: dict[str, object], keys: tuple[str, ...]) -> str:
+        for key in keys:
+            value = cert.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return ""
+
+    names: list[str] = []
+    industries: list[str] = []
+
+    for cert in certificates:
+        if not isinstance(cert, dict):
+            continue
+        name = pick_first_non_empty(cert, ("certification_project", "certificate_name", "name", "certificate_no"))
+        industry = pick_first_non_empty(cert, ("industry", "certification_scope", "scope"))
+        if name:
+            names.append(name)
+        if industry:
+            industries.append(industry)
+
+    return "；".join(names), "；".join(industries)
+
+
+def _extract_certificate_fields_with_fallback(company_info: dict[str, object], extra: dict[str, object]) -> tuple[str, str]:
+    cert_names, cert_industries = _extract_certificate_fields(company_info)
+    if cert_names or cert_industries:
+        return cert_names, cert_industries
+
+    extra_ai_company_info = extra.get("ai_company_info") if isinstance(extra.get("ai_company_info"), dict) else {}
+    cert_names, cert_industries = _extract_certificate_fields(extra_ai_company_info)
+    if cert_names or cert_industries:
+        return cert_names, cert_industries
+
+    ai_recognition = extra.get("ai_recognition") if isinstance(extra.get("ai_recognition"), dict) else {}
+    certs = ai_recognition.get("company_certificate") if isinstance(ai_recognition.get("company_certificate"), list) else []
+    if not certs:
+        return "", ""
+
+    fake_company_info: dict[str, object] = {"certificates": certs}
+    return _extract_certificate_fields(fake_company_info)
+
+
 def _pick_company_name(raw: dict[str, object], company_info: dict[str, object]) -> str:
     issuer_name = str(raw.get("issuer_full_name") or "").strip()
     if issuer_name:
@@ -1011,6 +1061,10 @@ async def analysis_lead_score() -> dict[str, object]:
             or _guess_insured_count(cleaned_company_info)
             or _guess_insured_count(cleaned_extra)
         )
+        certificate_names, certificate_industries = _extract_certificate_fields_with_fallback(
+            cleaned_company_info,
+            cleaned_extra,
+        )
 
         prepared_rows.append(
             {
@@ -1025,6 +1079,8 @@ async def analysis_lead_score() -> dict[str, object]:
                 "employee_count": employee_count,
                 "operating_revenue": operating_revenue,
                 "insured_count": insured_count,
+                "certificate_names": certificate_names,
+                "certificate_industries": certificate_industries,
                 "company_info": cleaned_company_info,
                 "extra": cleaned_extra,
             }
@@ -1082,6 +1138,8 @@ async def analysis_lead_score() -> dict[str, object]:
                 "employee_count": str(row.get("employee_count") or ""),
                 "operating_revenue": str(row.get("operating_revenue") or ""),
                 "insured_count": str(row.get("insured_count") or ""),
+                "certificate_names": str(row.get("certificate_names") or ""),
+                "certificate_industries": str(row.get("certificate_industries") or ""),
                 "reason": str(scored.get("reason") or "").strip()[:120],
                 "item_date": str(row.get("item_date") or ""),
             }

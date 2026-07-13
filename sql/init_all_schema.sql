@@ -86,6 +86,8 @@ CREATE TABLE IF NOT EXISTS ai_analysis_result (
   employee_count VARCHAR(128) NULL,
   operating_revenue VARCHAR(256) NULL,
   insured_count VARCHAR(128) NULL,
+  certificate_names TEXT NULL,
+  certificate_industries TEXT NULL,
   reason TEXT NULL,
   title VARCHAR(512) NULL,
   item_date DATE NULL,
@@ -123,6 +125,36 @@ SET @sql = (
       FROM information_schema.COLUMNS
       WHERE TABLE_SCHEMA = @db
         AND TABLE_NAME = 'ai_analysis_result'
+        AND COLUMN_NAME = 'certificate_names'
+    ),
+    'SELECT "certificate_names exists" AS msg',
+    'ALTER TABLE ai_analysis_result ADD COLUMN certificate_names TEXT NULL AFTER insured_count'
+  )
+);
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql = (
+  SELECT IF(
+    EXISTS(
+      SELECT 1
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = @db
+        AND TABLE_NAME = 'ai_analysis_result'
+        AND COLUMN_NAME = 'certificate_industries'
+    ),
+    'SELECT "certificate_industries exists" AS msg',
+    'ALTER TABLE ai_analysis_result ADD COLUMN certificate_industries TEXT NULL AFTER certificate_names'
+  )
+);
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql = (
+  SELECT IF(
+    EXISTS(
+      SELECT 1
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = @db
+        AND TABLE_NAME = 'ai_analysis_result'
         AND COLUMN_NAME = 'operating_revenue'
     ),
     'SELECT "operating_revenue exists" AS msg',
@@ -145,4 +177,3 @@ SET @sql = (
   )
 );
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
