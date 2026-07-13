@@ -1,11 +1,13 @@
-// const backendUrl = '/crawlee-api/fetch';
+// const backendUrl = '/crawlee-api/results/mysql';
 // const uploadBackendUrl = '/crawlee-api/upload/image';
 // const recognizeBackendUrl = '/crawlee-api/issuer/recognize';
 
-const backendUrl = 'http://127.0.0.1:8765/fetch';
+const backendUrl = 'http://127.0.0.1:8765/results/mysql';
+const fetchBackendUrl = 'http://127.0.0.1:8765/fetch';
 const uploadBackendUrl = 'http://127.0.0.1:8765/upload/image';
 const recognizeBackendUrl = 'http://127.0.0.1:8765/issuer/recognize';
 
+const startQueryBtn = document.getElementById('startQueryBtn');
 const queryBtn = document.getElementById('queryBtn');
 const statusText = document.getElementById('statusText');
 const resultTables = document.getElementById('resultTables');
@@ -29,6 +31,21 @@ const ITEM_COLUMNS = [
     'accounting_firm',
     'update_date',
     'accept_date',
+];
+
+const COMPANY_INFO_COLUMNS = [
+    'company_name',
+    'issuer_full_name',
+    'contact_name',
+    'phone',
+    'email',
+    'employee_count',
+    'operating_revenue',
+    'insured_count',
+    'certificates',
+    'reason',
+    'matched_image_urls',
+    'notice_url',
 ];
 
 const modalState = {
@@ -122,10 +139,6 @@ function setUploadUiState(uploading, message = '', type = '') {
     }
 }
 
-function getRequestUrl() {
-    return '*';
-}
-
 function buildIssuerCell(cellValue, sourceUrl, noticeUrl) {
     const safeText = escapeHtml(cellValue);
     const copyAttr = encodeAttr(cellValue);
@@ -153,6 +166,63 @@ function renderItemsTable(items, sourceUrl) {
                 }
                 return `<td>${escapeHtml(cellValue)}</td>`;
             }).join('');
+            return `<tr>${cells}</tr>`;
+        })
+        .join('');
+
+    return `
+    <div class="table-wrap">
+      <table>
+        <thead><tr>${header}</tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function hasCompanyInfo(item) {
+    const info = item?.company_info;
+    return info && typeof info === 'object' && Object.keys(info).length > 0;
+}
+
+function normalizeCompanyInfoValue(value) {
+    if (Array.isArray(value)) {
+        return value.map((x) => String(x ?? '')).filter(Boolean).join('；');
+    }
+    if (value && typeof value === 'object') {
+        return JSON.stringify(value, null, 0);
+    }
+    return value ?? '';
+}
+
+function renderCompanyInfoTable(items) {
+    if (!Array.isArray(items) || items.length === 0) {
+        return '<p class="empty">无已识别 company_info 数据</p>';
+    }
+
+    const aiItems = items.filter((item) => hasCompanyInfo(item));
+    if (aiItems.length === 0) {
+        return '<p class="empty">无已识别 company_info 数据</p>';
+    }
+
+    const header = COMPANY_INFO_COLUMNS.map((col) => `<th>${escapeHtml(col)}</th>`).join('');
+    const body = aiItems
+        .map((item) => {
+            const info = item.company_info || {};
+            const cells = COMPANY_INFO_COLUMNS.map((col) => {
+                if (col === 'notice_url') {
+                    const noticeUrl = info.notice_url || item?.url || '';
+                    if (!noticeUrl) {
+                        return '<td></td>';
+                    }
+                    const safeUrl = escapeHtml(noticeUrl);
+                    return `<td><a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeUrl}</a></td>`;
+                }
+
+                const raw = normalizeCompanyInfoValue(info[col]);
+                return `<td>${escapeHtml(raw)}</td>`;
+            }).join('');
+
             return `<tr>${cells}</tr>`;
         })
         .join('');
@@ -310,7 +380,7 @@ function applyCurrentRowPatch(context, patch) {
 
     let updated = false;
     for (const [sourceUrl, detail] of Object.entries(currentResultsData)) {
-        if (!detail || typeof detail !== 'object' || !Array.isArray(detail.items)) {
+        if (!detail || typeof detail !== 'object' || !Array.isArray(detail.rows)) {
             continue;
         }
 
@@ -318,7 +388,7 @@ function applyCurrentRowPatch(context, patch) {
             continue;
         }
 
-        for (const item of detail.items) {
+        for (const item of detail.rows) {
             if (!item || typeof item !== 'object') {
                 continue;
             }
@@ -400,44 +470,63 @@ function renderResults(data) {
         return;
     }
 
-    const fragments = entries.map(([sourceUrl, detail]) => {
-        const statusCode = detail?.status_code ?? '';
-        const title = detail?.title ?? '';
-        const htmlLength = detail?.html_length ?? '';
-        const rowCount = Array.isArray(detail?.items) ? detail.items.length : 0;
-
-        return `
-      <article class="result-card">
-        <h3>${escapeHtml(sourceUrl)}</h3>
-        <p class="meta-line">status_code: ${escapeHtml(statusCode)} | title: ${escapeHtml(title)} | html_length: ${escapeHtml(htmlLength)} | items: ${escapeHtml(rowCount)}</p>
-        ${renderItemsTable(detail?.items, sourceUrl)}
-      </article>
+    const tableHeader = `
+      <thead>
+        <tr>
+          <th>issuer_full_name</th>
+        </tr>
+      </thead>
     `;
-    });
 
-    resultTables.innerHTML = fragments.join('');
+    const tableBody = entries
+        .map(([sourceUrl, detail]) => {
+            const statusCode = detail?.status_code ?? '';
+            const title = detail?.title ?? '';
+            const htmlLength = detail?.html_length ?? '';
+            const rows = Array.isArray(detail?.rows) ? detail.rows : [];
+
+            if (rows.length === 0) {
+                return '';
+            }
+
+            return rows
+                .map((item, index) => {
+                    const issuerName = item?.issuer_full_name ?? '';
+                    const noticeUrl = item?.url ?? '';
+                    return `
+            <tr>
+              ${buildIssuerCell(issuerName, sourceUrl, noticeUrl)}
+            </tr>
+          `;
+                })
+                .join('');
+        })
+        .join('');
+
+    if (!tableBody.trim()) {
+        resultTables.innerHTML = '<p class="empty">返回结果为空</p>';
+        return;
+    }
+
+    const fragments = `
+      <div class="table-wrap">
+        <table>
+          ${tableHeader}
+          <tbody>${tableBody}</tbody>
+        </table>
+      </div>
+    `;
+
+    resultTables.innerHTML = fragments;
     bindCopyEvents();
 }
 
 async function runQuery() {
-    let requestUrl = '';
-    try {
-        requestUrl = getRequestUrl();
-    } catch (error) {
-        setStatus(error.message, 'err');
-        return;
-    }
     setStatus('查询中...');
-    resultTables.innerHTML = '<p class="empty">正在请求后端...</p>';
+    resultTables.innerHTML = '<p class="empty">正在从数据库加载已保存结果...</p>';
 
     try {
-        const response = await fetch(backendUrl, {
-            method: 'POST',
-            headers: {
-                'content-type': 'application/json',
-            },
-            body: JSON.stringify({ url: requestUrl }),
-        });
+        const response = await fetch(backendUrl);
 
         const text = await response.text();
         let parsed;
@@ -453,6 +542,42 @@ async function runQuery() {
     } catch (error) {
         resultTables.innerHTML = `<p class="empty">请求失败：${escapeHtml(error.message)}</p>`;
         setStatus('请求异常', 'err');
+    }
+}
+
+async function startQuery() {
+    setStatus('查询中...');
+    resultTables.innerHTML = '<p class="empty">正在请求后端开始抓取...</p>';
+
+    try {
+        const response = await fetch(fetchBackendUrl, {
+            method: 'POST',
+            headers: {
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+                url: '*',
+            }),
+        });
+
+        const text = await response.text();
+        let parsed;
+
+        try {
+            parsed = text ? JSON.parse(text) : {};
+        } catch {
+            throw new Error('后端返回的不是有效 JSON');
+        }
+
+        if (!response.ok) {
+            throw new Error(parsed?.detail || `开始查询失败（${response.status}）`);
+        }
+
+        renderResults(parsed);
+        setStatus(`查询成功 ${response.status}`, 'ok');
+    } catch (error) {
+        resultTables.innerHTML = `<p class="empty">请求失败：${escapeHtml(error.message)}</p>`;
+        setStatus('查询失败', 'err');
     }
 }
 
@@ -495,5 +620,7 @@ pasteZone.addEventListener('paste', (event) => {
     }
 });
 
+startQueryBtn.addEventListener('click', startQuery);
 queryBtn.addEventListener('click', runQuery);
 renderImagePreview();
+runQuery();

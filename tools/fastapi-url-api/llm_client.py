@@ -150,6 +150,27 @@ def clean_year_suffix(value: Any) -> Any:
     return value
 
 
+def _normalize_recognition_json_shape(obj: dict[str, Any]) -> dict[str, Any]:
+    company_profile = obj.get("company_profile")
+    company_registry_profile = obj.get("company_registry_profile")
+    company_certificate = obj.get("company_certificate")
+
+    if not isinstance(company_profile, dict):
+        company_profile = {}
+    if not isinstance(company_registry_profile, dict):
+        company_registry_profile = {}
+    if isinstance(company_certificate, dict):
+        company_certificate = [company_certificate]
+    if not isinstance(company_certificate, list):
+        company_certificate = []
+
+    return {
+        "company_profile": company_profile,
+        "company_registry_profile": company_registry_profile,
+        "company_certificate": [x for x in company_certificate if isinstance(x, dict)],
+    }
+
+
 async def recognize_company_from_images(image_urls: list[str], timeout_seconds: float = 180.0) -> dict[str, Any]:
     urls = [str(u).strip() for u in image_urls if str(u).strip()]
     if len(urls) == 0:
@@ -158,22 +179,38 @@ async def recognize_company_from_images(image_urls: list[str], timeout_seconds: 
     model, base_url, api_key = _read_vision_config()
 
     prompt = (
-        "下面这些图片是同一家公司信息页面的分段截图，不是多家公司。"
-        "请把所有图片合并理解后，输出尽可能完整的识别结果。"
-        "不要只返回固定字段，不要省略可识别信息。\\n\\n"
-        "严格规则：\\n"
-        "1) 只输出一个 JSON，不要输出额外说明文字；\\n"
-        "2) 字段值里禁止出现‘图片1’、‘图片2’、‘两者’、‘见上图’等来源占位词；\\n"
-        "3) 如果某字段无法确认，值必须是 null，不要编造；\\n"
-        "4) 来源信息只能放在 evidence 中，不能放到业务字段值里；\\n"
-        "5) 删除无意义字段（例如 english_name=图片2）；\\n"
-        "6) 字段值不要包含年份括号后缀，例如把‘2271 (2025年)’输出为‘2271’。\\n\\n"
-        "JSON 输出结构建议：\\n"
+        "下面这些图片是同一家公司信息页面的分段截图。请合并理解并只返回一个 JSON。\\n\\n"
+        "【必须遵守】\\n"
+        "1) 只能输出 JSON，不允许 markdown/代码块/解释文字。\\n"
+        "2) 顶层 key 只能是 company_profile、company_registry_profile、company_certificate。\\n"
+        "3) 字段名必须使用 snake_case，并严格使用给定字段名。\\n"
+        "4) 缺失值填 null；日期用 YYYY-MM-DD；company_certificate 必须是数组。\\n\\n"
+        "输出模板：\\n"
         "{\\n"
-        '  "company_info": { ... 所有可识别公司字段 ... },\\n'
-        '  "evidence": { ... 仅记录字段来源: image1/image2/both ... },\\n'
-        '  "full_ocr_text": "多图完整文本",\\n'
-        '  "uncertain_items": [ ... 不确定字段 ... ]\\n'
+        '  "company_profile": {\\n'
+        '    "company_name": null, "status": null, "brand_logo": null, "stock_code": null, "stock_market": null,\\n'
+        '    "unified_social_credit_code": null, "legal_representative": null, "registered_capital": null, "establishment_date": null,\\n'
+        '    "phone": null, "email": null, "website": null, "address": null,\\n'
+        '    "industry": null, "scale": null, "employees_text": null, "revenue_text": null,\\n'
+        '    "enterprise_score_text": null, "tech_innovation_score_text": null,\\n'
+        '    "tags": [], "scores": {}, "basic_info": {}, "contact_info": {}, "business_data": {}, "ai_summary": null\\n'
+        '  },\\n'
+        '  "company_registry_profile": {\\n'
+        '    "unified_social_credit_code": null, "company_name": null, "registration_status": null, "establishment_date": null,\\n'
+        '    "legal_representative": null, "registered_capital": null, "paid_in_capital": null, "organization_code": null,\\n'
+        '    "registration_number": null, "taxpayer_id": null, "company_type": null, "business_term": null, "taxpayer_qualification": null,\\n'
+        '    "insured_persons": null, "branch_insured_persons": null, "approval_date": null, "region": null,\\n'
+        '    "registration_authority": null, "import_export_code": null, "industry": null, "english_name": null,\\n'
+        '    "registered_address": null, "former_names": [], "business_scope": null\\n'
+        '  },\\n'
+        '  "company_certificate": [\\n'
+        '    {\\n'
+        '      "certificate_no": null, "certificate_status": null, "issue_date": null, "expiry_date": null,\\n'
+        '      "first_issue_date": null, "report_date": null, "supervision_count": null, "recertification_count": null,\\n'
+        '      "certification_project": null, "accreditation_mark": null, "certification_scope": null, "certification_basis": null,\\n'
+        '      "covers_multiple_sites": null, "is_sub_certificate": null, "parent_certificate_no": null\\n'
+        '    }\\n'
+        '  ]\\n'
         "}"
     )
 
@@ -229,10 +266,11 @@ async def recognize_company_from_images(image_urls: list[str], timeout_seconds: 
     cleaned_text = _strip_code_fence(raw_text)
     try:
         loaded = json.loads(cleaned_text)
-        if isinstance(loaded, dict):
-            parsed = clean_year_suffix(loaded)
+        if not isinstance(loaded, dict):
+            raise LLMClientError("Vision LLM must return a JSON object")
+        parsed = _normalize_recognition_json_shape(clean_year_suffix(loaded))
     except json.JSONDecodeError:
-        parsed = None
+        raise LLMClientError("Vision LLM returned non-JSON content")
 
     return {
         "model": model,

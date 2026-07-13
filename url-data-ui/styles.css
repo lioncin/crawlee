@@ -116,8 +116,34 @@ button:hover {
   filter: brightness(1.05);
 }
 
+.actions-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(140px, 180px));
+  gap: 10px;
+  justify-content: start;
+}
+
+#startQueryBtn,
 #queryBtn {
-  width: 180px;
+  width: 100%;
+}
+
+#startQueryBtn {
+  background: linear-gradient(120deg, #0f766e, #0ea5a8);
+}
+
+#queryBtn {
+  background: linear-gradient(120deg, #334155, #475569);
+}
+
+#startQueryBtn:hover,
+#queryBtn:hover {
+  filter: brightness(1.08);
+}
+
+#startQueryBtn:active,
+#queryBtn:active {
+  transform: translateY(1px);
 }
 
 .hint {
@@ -236,6 +262,10 @@ td a:hover {
 
 @media (max-width: 920px) {
   .input-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .actions-row {
     grid-template-columns: 1fr;
   }
 

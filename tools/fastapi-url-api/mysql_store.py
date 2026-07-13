@@ -87,6 +87,294 @@ def _loads_json(value: Any) -> Any:
     return None
 
 
+def _pick_first(data: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        val = data.get(key)
+        if val is None:
+            continue
+        if isinstance(val, str) and not val.strip():
+            continue
+        return val
+    return None
+
+
+def _to_bool01(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1 if value else 0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "是", "有", "覆盖", "有效"}:
+        return 1
+    if text in {"0", "false", "no", "n", "否", "无", "不覆盖", "无效"}:
+        return 0
+    return None
+
+
+def _to_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+
+def _upsert_company_profile(cur, item_id: int, source_url: str, notice_url: str, parsed: dict[str, Any], company_info: dict[str, Any]) -> int:
+    basic_info = parsed.get("basic_info") if isinstance(parsed.get("basic_info"), dict) else {}
+    contact_info = parsed.get("contact_info") if isinstance(parsed.get("contact_info"), dict) else {}
+    business_data = parsed.get("business_data") if isinstance(parsed.get("business_data"), dict) else {}
+    scores = parsed.get("scores") if isinstance(parsed.get("scores"), dict) else {}
+
+    company_name = _pick_first(company_info, "company_name", "issuer_full_name") or _pick_first(basic_info, "company_name")
+    if not company_name:
+        company_name = _pick_first(parsed, "company_name", "issuer_full_name") or ""
+
+    cur.execute(
+        """
+        INSERT INTO company_profile (
+          source_item_id, company_name, status, brand_logo,
+          stock_code, stock_market,
+          unified_social_credit_code, legal_representative, registered_capital, establishment_date,
+          phone, email, website, address,
+          industry, scale, employees_text, revenue_text,
+          enterprise_score_text, tech_innovation_score_text,
+          tags_json, scores_json, basic_info_json, contact_info_json, business_data_json,
+          ai_summary, raw_payload
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+          source_item_id = VALUES(source_item_id),
+          status = VALUES(status),
+          brand_logo = VALUES(brand_logo),
+          stock_market = VALUES(stock_market),
+          legal_representative = VALUES(legal_representative),
+          registered_capital = VALUES(registered_capital),
+          establishment_date = VALUES(establishment_date),
+          phone = VALUES(phone),
+          email = VALUES(email),
+          website = VALUES(website),
+          address = VALUES(address),
+          industry = VALUES(industry),
+          scale = VALUES(scale),
+          employees_text = VALUES(employees_text),
+          revenue_text = VALUES(revenue_text),
+          enterprise_score_text = VALUES(enterprise_score_text),
+          tech_innovation_score_text = VALUES(tech_innovation_score_text),
+          tags_json = VALUES(tags_json),
+          scores_json = VALUES(scores_json),
+          basic_info_json = VALUES(basic_info_json),
+          contact_info_json = VALUES(contact_info_json),
+          business_data_json = VALUES(business_data_json),
+          ai_summary = VALUES(ai_summary),
+          raw_payload = VALUES(raw_payload),
+          updated_at = CURRENT_TIMESTAMP,
+          id = LAST_INSERT_ID(id)
+        """,
+        (
+            item_id,
+            str(company_name or ""),
+            _pick_first(parsed, "status", "registration_status"),
+            _pick_first(parsed, "brand_logo"),
+            _pick_first(parsed.get("stock_info") if isinstance(parsed.get("stock_info"), dict) else {}, "code", "stock_code"),
+            _pick_first(parsed.get("stock_info") if isinstance(parsed.get("stock_info"), dict) else {}, "market", "stock_market"),
+            _pick_first(basic_info, "unified_social_credit_code"),
+            _pick_first(basic_info, "legal_representative"),
+            _pick_first(basic_info, "registered_capital"),
+            _parse_date(_pick_first(basic_info, "establishment_date")),
+            _pick_first(contact_info, "phone"),
+            _pick_first(contact_info, "email"),
+            _pick_first(contact_info, "website"),
+            _pick_first(contact_info, "address", "registered_address"),
+            _pick_first(business_data, "industry") or _pick_first(basic_info, "industry"),
+            _pick_first(business_data, "scale"),
+            _pick_first(business_data, "employees", "employee_count"),
+            _pick_first(business_data, "revenue", "operating_revenue"),
+            _pick_first(scores, "enterprise_score"),
+            _pick_first(scores, "tech_innovation_score"),
+            _to_json(parsed.get("tags") if isinstance(parsed.get("tags"), list) else []),
+            _to_json(scores),
+            _to_json(basic_info),
+            _to_json(contact_info),
+            _to_json(business_data),
+            _pick_first(parsed, "ai_summary"),
+            _to_json({"source_url": source_url, "notice_url": notice_url, "parsed": parsed}),
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def _upsert_company_registry_profile(cur, company_profile_id: int | None, item_id: int, parsed: dict[str, Any]) -> int | None:
+    basic_info = parsed.get("basic_info") if isinstance(parsed.get("basic_info"), dict) else {}
+    if not basic_info:
+        return None
+
+    uscc = _pick_first(basic_info, "unified_social_credit_code")
+    company_name = _pick_first(basic_info, "company_name")
+    if not uscc or not company_name:
+        return None
+
+    cur.execute(
+        """
+        INSERT INTO company_registry_profile (
+          source_item_id, unified_social_credit_code, company_name,
+          registration_status, establishment_date, legal_representative,
+          registered_capital, paid_in_capital,
+          organization_code, registration_number, taxpayer_id,
+          company_type, business_term, taxpayer_qualification,
+          insured_persons, branch_insured_persons, approval_date,
+          region, registration_authority, import_export_code, industry,
+          english_name, registered_address,
+          former_names, basic_info_json, business_scope, raw_payload
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+          source_item_id = VALUES(source_item_id),
+          company_name = VALUES(company_name),
+          registration_status = VALUES(registration_status),
+          establishment_date = VALUES(establishment_date),
+          legal_representative = VALUES(legal_representative),
+          registered_capital = VALUES(registered_capital),
+          paid_in_capital = VALUES(paid_in_capital),
+          organization_code = VALUES(organization_code),
+          registration_number = VALUES(registration_number),
+          taxpayer_id = VALUES(taxpayer_id),
+          company_type = VALUES(company_type),
+          business_term = VALUES(business_term),
+          taxpayer_qualification = VALUES(taxpayer_qualification),
+          insured_persons = VALUES(insured_persons),
+          branch_insured_persons = VALUES(branch_insured_persons),
+          approval_date = VALUES(approval_date),
+          region = VALUES(region),
+          registration_authority = VALUES(registration_authority),
+          import_export_code = VALUES(import_export_code),
+          industry = VALUES(industry),
+          english_name = VALUES(english_name),
+          registered_address = VALUES(registered_address),
+          former_names = VALUES(former_names),
+          basic_info_json = VALUES(basic_info_json),
+          business_scope = VALUES(business_scope),
+          raw_payload = VALUES(raw_payload),
+          updated_at = CURRENT_TIMESTAMP,
+          id = LAST_INSERT_ID(id)
+        """,
+        (
+            item_id,
+            str(uscc),
+            str(company_name),
+            _pick_first(basic_info, "registration_status", "status"),
+            _parse_date(_pick_first(basic_info, "establishment_date")),
+            _pick_first(basic_info, "legal_representative"),
+            _pick_first(basic_info, "registered_capital"),
+            _pick_first(basic_info, "paid_in_capital"),
+            _pick_first(basic_info, "organization_code"),
+            _pick_first(basic_info, "registration_number"),
+            _pick_first(basic_info, "taxpayer_id"),
+            _pick_first(basic_info, "company_type"),
+            _pick_first(basic_info, "business_term"),
+            _pick_first(basic_info, "taxpayer_qualification"),
+            _pick_first(basic_info, "insured_persons"),
+            _pick_first(basic_info, "branch_insured_persons"),
+            _parse_date(_pick_first(basic_info, "approval_date")),
+            _pick_first(basic_info, "region"),
+            _pick_first(basic_info, "registration_authority"),
+            _pick_first(basic_info, "import_export_code"),
+            _pick_first(basic_info, "industry"),
+            _pick_first(basic_info, "english_name"),
+            _pick_first(basic_info, "registered_address"),
+            _to_json(_pick_first(basic_info, "former_names") if isinstance(_pick_first(basic_info, "former_names"), list) else []),
+            _to_json(basic_info),
+            _pick_first(parsed, "business_scope"),
+            _to_json(parsed),
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def _upsert_company_certificates(cur, company_profile_id: int | None, item_id: int, parsed: dict[str, Any], company_info: dict[str, Any]) -> int:
+    cert_rows: list[dict[str, Any]] = []
+    cert_value = _pick_first(company_info, "certificates", "certificate_list")
+    if isinstance(cert_value, list):
+        cert_rows.extend([x for x in cert_value if isinstance(x, dict)])
+    elif isinstance(cert_value, dict):
+        cert_rows.append(cert_value)
+
+    if isinstance(parsed.get("certificate"), dict):
+        cert_rows.append(parsed.get("certificate"))
+    if isinstance(parsed.get("certificates"), list):
+        cert_rows.extend([x for x in parsed.get("certificates") if isinstance(x, dict)])
+
+    affected = 0
+    for cert in cert_rows:
+        cert_no = _pick_first(cert, "certificate_no", "证书编号")
+        if not cert_no:
+            continue
+
+        cur.execute(
+            """
+            INSERT INTO company_certificate (
+              company_id, source_item_id,
+              certificate_no, certificate_status,
+              issue_date, expiry_date, first_issue_date, report_date,
+              supervision_count, recertification_count,
+              certification_project, accreditation_mark,
+              certification_scope, certification_basis,
+              covers_multiple_sites, is_sub_certificate, parent_certificate_no,
+              raw_payload
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+              company_id = VALUES(company_id),
+              source_item_id = VALUES(source_item_id),
+              certificate_status = VALUES(certificate_status),
+              issue_date = VALUES(issue_date),
+              expiry_date = VALUES(expiry_date),
+              first_issue_date = VALUES(first_issue_date),
+              report_date = VALUES(report_date),
+              supervision_count = VALUES(supervision_count),
+              recertification_count = VALUES(recertification_count),
+              certification_project = VALUES(certification_project),
+              accreditation_mark = VALUES(accreditation_mark),
+              certification_scope = VALUES(certification_scope),
+              certification_basis = VALUES(certification_basis),
+              covers_multiple_sites = VALUES(covers_multiple_sites),
+              is_sub_certificate = VALUES(is_sub_certificate),
+              parent_certificate_no = VALUES(parent_certificate_no),
+              raw_payload = VALUES(raw_payload),
+              updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                company_profile_id,
+                item_id,
+                str(cert_no),
+                _pick_first(cert, "certificate_status", "证书状态"),
+                _parse_date(_pick_first(cert, "issue_date", "颁证日期")),
+                _parse_date(_pick_first(cert, "expiry_date", "证书到期日期")),
+                _parse_date(_pick_first(cert, "first_issue_date", "初次获证日期")),
+                _parse_date(_pick_first(cert, "report_date", "信息上报日期")),
+                _to_int(_pick_first(cert, "supervision_count", "监督次数")),
+                _to_int(_pick_first(cert, "recertification_count", "再认证次数")),
+                _pick_first(cert, "certification_project", "认证项目"),
+                _pick_first(cert, "accreditation_mark", "证书使用的认可标识"),
+                _pick_first(cert, "certification_scope", "认证范围/认证覆盖的业务范围"),
+                _pick_first(cert, "certification_basis", "认证依据"),
+                _to_bool01(_pick_first(cert, "covers_multiple_sites", "是否覆盖多场所")),
+                _to_bool01(_pick_first(cert, "is_sub_certificate", "是否是子证书")),
+                _pick_first(cert, "parent_certificate_no", "主认证证书号"),
+                _to_json(cert),
+            ),
+        )
+        affected += 1
+
+    return affected
+
+
+
 def _iter_pages(request_url: str, result_payload: dict[str, Any]) -> Iterable[tuple[str, dict[str, Any]]]:
     if "status_code" in result_payload and "url" in result_payload:
         source_url = str(result_payload.get("url") or request_url)
@@ -359,7 +647,16 @@ def load_latest_results_from_mysql(source_url: str | None = None, limit: int = 2
                 src = str(row.get("source_url"))
                 if isinstance(payload, dict):
                     _hydrate_page_items_from_entity(cur, src, payload)
-                return {src: payload}
+                    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+                else:
+                    items = []
+
+                return {
+                    src: {
+                        **(payload if isinstance(payload, dict) else {}),
+                        "rows": items,
+                    }
+                }
 
             cur.execute(
                 """
@@ -393,7 +690,15 @@ def load_latest_results_from_mysql(source_url: str | None = None, limit: int = 2
                     continue
                 if isinstance(payload, dict):
                     _hydrate_page_items_from_entity(cur, src, payload)
-                result[src] = payload
+                    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+                    result[src] = {
+                        **payload,
+                        "rows": items,
+                    }
+                else:
+                    result[src] = {
+                        "rows": [],
+                    }
 
             return result
 
@@ -440,6 +745,19 @@ def save_issuer_recognition_result(
         val = company_info.get(key)
         if val is not None:
             patch[key] = str(val).strip() or None
+
+    for key in (
+        "employee_count",
+        "operating_revenue",
+        "insured_count",
+    ):
+        val = company_info.get(key)
+        if val is not None:
+            patch[key] = str(val).strip() or None
+
+    certificates = company_info.get("certificates") if isinstance(company_info.get("certificates"), list) else None
+    if certificates is not None:
+        patch["certificates"] = certificates
 
     with pymysql.connect(**cfg) as conn:
         with conn.cursor() as cur:
@@ -495,6 +813,10 @@ def save_issuer_recognition_result(
 
             ai_kv_rows = [
                 ("ai_company_info", company_info if isinstance(company_info, dict) else None),
+                ("ai_employee_count", company_info.get("employee_count") if isinstance(company_info, dict) else None),
+                ("ai_operating_revenue", company_info.get("operating_revenue") if isinstance(company_info, dict) else None),
+                ("ai_insured_count", company_info.get("insured_count") if isinstance(company_info, dict) else None),
+                ("ai_certificates", company_info.get("certificates") if isinstance(company_info, dict) else None),
                 ("ai_evidence", parsed.get("evidence") if isinstance(parsed, dict) else None),
                 ("ai_full_ocr_text", parsed.get("full_ocr_text") if isinstance(parsed, dict) else None),
                 ("ai_uncertain_items", parsed.get("uncertain_items") if isinstance(parsed, dict) else None),
@@ -533,6 +855,9 @@ def save_issuer_recognition_result(
         "item_id": item_id,
         "item_patch": patch,
         "company_info": company_info,
+        "company_profile_id": company_profile_id,
+        "company_registry_profile_id": company_registry_profile_id,
+        "certificate_count": certificate_count,
     }
 
 
