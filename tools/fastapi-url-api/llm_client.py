@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -20,6 +21,9 @@ YEAR_SUFFIX_PATTERN = re.compile(r"\s*[（(]\s*\d{4}年(?:报)?\s*[)）]\s*$")
 
 class LLMClientError(RuntimeError):
     pass
+
+
+logger = logging.getLogger(__name__)
 
 
 def _load_dotenv(env_path: Path) -> None:
@@ -171,7 +175,59 @@ def _normalize_recognition_json_shape(obj: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def recognize_company_from_images(image_urls: list[str], timeout_seconds: float = 180.0) -> dict[str, Any]:
+def _merge_non_empty_fields(primary: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(primary)
+    for key, value in fallback.items():
+        if key not in merged:
+            merged[key] = value
+            continue
+
+        cur = merged.get(key)
+        if cur in (None, "", [], {}):
+            merged[key] = value
+
+    return merged
+
+
+def _is_all_empty_recognition(parsed: dict[str, Any]) -> bool:
+    if not isinstance(parsed, dict):
+        return True
+
+    profile = parsed.get("company_profile") if isinstance(parsed.get("company_profile"), dict) else {}
+    registry = parsed.get("company_registry_profile") if isinstance(parsed.get("company_registry_profile"), dict) else {}
+    certs = parsed.get("company_certificate") if isinstance(parsed.get("company_certificate"), list) else []
+
+    def has_non_empty(d: dict[str, Any]) -> bool:
+        for value in d.values():
+            if value not in (None, "", [], {}):
+                return True
+        return False
+
+    has_cert = any(isinstance(x, dict) and any(v not in (None, "", [], {}) for v in x.values()) for x in certs)
+    return not has_non_empty(profile) and not has_non_empty(registry) and not has_cert
+
+
+def _to_company_info(parsed: dict[str, Any]) -> dict[str, Any]:
+    profile = parsed.get("company_profile") if isinstance(parsed.get("company_profile"), dict) else {}
+    registry = parsed.get("company_registry_profile") if isinstance(parsed.get("company_registry_profile"), dict) else {}
+    certs = parsed.get("company_certificate") if isinstance(parsed.get("company_certificate"), list) else []
+
+    merged_profile = _merge_non_empty_fields(profile, registry)
+
+    return {
+        "issuer_full_name": merged_profile.get("issuer_full_name") or merged_profile.get("company_name"),
+        "company_name": merged_profile.get("company_name") or merged_profile.get("issuer_full_name"),
+        "contact_name": merged_profile.get("contact_name") or merged_profile.get("contact") or merged_profile.get("contact_person"),
+        "phone": merged_profile.get("phone") or merged_profile.get("telephone") or merged_profile.get("mobile"),
+        "email": merged_profile.get("email") or merged_profile.get("mail"),
+        "employee_count": merged_profile.get("employee_count") or merged_profile.get("employees_text") or merged_profile.get("staff_count"),
+        "operating_revenue": merged_profile.get("operating_revenue") or merged_profile.get("revenue_text") or merged_profile.get("annual_revenue"),
+        "insured_count": merged_profile.get("insured_count") or merged_profile.get("insured_persons") or merged_profile.get("insured_num"),
+        "certificates": [x for x in certs if isinstance(x, dict)],
+    }
+
+
+async def recognize_company_from_images(image_urls: list[str], timeout_seconds: float = 420.0) -> dict[str, Any]:
     urls = [str(u).strip() for u in image_urls if str(u).strip()]
     if len(urls) == 0:
         raise LLMClientError("image_urls must not be empty")
@@ -221,6 +277,8 @@ async def recognize_company_from_images(image_urls: list[str], timeout_seconds: 
         "model": model,
         "messages": [{"role": "user", "content": content}],
         "temperature": 0,
+        "max_tokens": 4096,
+        "response_format": {"type": "json_object"},
     }
 
     headers = {
@@ -272,10 +330,61 @@ async def recognize_company_from_images(image_urls: list[str], timeout_seconds: 
     except json.JSONDecodeError:
         raise LLMClientError("Vision LLM returned non-JSON content")
 
+    logger.info("recognize_company_from_images raw_text(head): %s", (raw_text or "")[:500])
+
+    retry_used = False
+    warning = ""
+
+    if _is_all_empty_recognition(parsed):
+        retry_used = True
+        retry_prompt = (
+            "请重新读取这些图片，并尽量提取公司基础信息。\n"
+            "只输出 JSON，顶层必须包含 company_profile、company_registry_profile、company_certificate。\n"
+            "如果无法确认具体值，也请尽量填写截图中可见的公司名、员工人数、营收、参保人数等字段。"
+        )
+        retry_content: list[dict[str, Any]] = [{"type": "text", "text": retry_prompt}]
+        retry_content.extend({"type": "image_url", "image_url": {"url": url}} for url in urls)
+        retry_payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": retry_content}],
+            "temperature": 0,
+            "max_tokens": 4096,
+            "response_format": {"type": "json_object"},
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=20.0, read=timeout_seconds, write=30.0, pool=20.0)) as client:
+                retry_resp = await client.post(url, headers=headers, json=retry_payload)
+            retry_resp.raise_for_status()
+            retry_data = retry_resp.json()
+            retry_choices = retry_data.get("choices")
+            retry_message = retry_choices[0].get("message") if isinstance(retry_choices, list) and retry_choices else {}
+            retry_answer = retry_message.get("content") if isinstance(retry_message, dict) else ""
+            retry_text = retry_answer if isinstance(retry_answer, str) else ""
+            logger.info("recognize_company_from_images retry_raw_text(head): %s", (retry_text or "")[:500])
+
+            retry_loaded = json.loads(_strip_code_fence(retry_text))
+            if isinstance(retry_loaded, dict):
+                retry_parsed = _normalize_recognition_json_shape(clean_year_suffix(retry_loaded))
+                if not _is_all_empty_recognition(retry_parsed):
+                    parsed = retry_parsed
+                    raw_text = retry_text
+                else:
+                    warning = "LLM returned empty structured fields twice; check model vision capability or image readability"
+            else:
+                warning = "LLM retry returned non-object JSON"
+        except Exception as exc:
+            warning = f"LLM retry failed: {exc}"
+
+    company_info = _to_company_info(parsed)
+
     return {
         "model": model,
         "raw_text": raw_text,
         "parsed": parsed,
+        "company_info": company_info,
+        "warning": warning,
+        "retry_used": retry_used,
         "image_urls": urls,
     }
 

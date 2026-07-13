@@ -347,20 +347,29 @@ function flattenAiGroups(data) {
         return '';
     };
 
+    const pickFromBusinessData = (item, keys) => {
+        const businessData = item?.company_info?.business_data;
+        if (!businessData || typeof businessData !== 'object') {
+            return '';
+        }
+        return pickFirstNonEmpty(businessData, keys);
+    };
+
     for (const grade of GRADE_ORDER) {
         const items = Array.isArray(groups[grade]) ? groups[grade] : [];
         for (const item of items) {
             rows.push({
                 grade,
                 company_name: String(item?.company_name ?? '').trim(),
-                employee_count: pickFirstNonEmpty(item, ['employee_count', 'staff_count', 'employee_num', 'staff_num']),
-                operating_revenue: pickFirstNonEmpty(item, [
-                    'operating_revenue',
-                    'revenue',
-                    'annual_revenue',
-                    'business_revenue',
-                ]),
-                insured_count: pickFirstNonEmpty(item, ['insured_count', 'insured_num', 'social_security_count']),
+                employee_count:
+                    pickFromBusinessData(item, ['employees', 'employees_text']) ||
+                    pickFirstNonEmpty(item, ['employee_count', 'staff_count', 'employee_num', 'staff_num']),
+                operating_revenue:
+                    pickFromBusinessData(item, ['revenue_text']) ||
+                    pickFirstNonEmpty(item, ['operating_revenue', 'revenue', 'annual_revenue', 'business_revenue']),
+                insured_count:
+                    pickFromBusinessData(item, ['insured_persons']) ||
+                    pickFirstNonEmpty(item, ['insured_count', 'insured_num', 'social_security_count']),
                 reason: String(item?.reason ?? '').trim(),
                 title: String(item?.title ?? '').trim(),
                 item_date: String(item?.item_date ?? '').trim(),

@@ -66,7 +66,7 @@ class IssuerRecognitionRequest(BaseModel):
     notice_url: str
     issuer_name: str
     image_urls: list[str] = Field(default_factory=list)
-    timeout_seconds: float = 180.0
+    timeout_seconds: float = 420.0
 
 
 class NoticeItem(BaseModel):
@@ -667,6 +667,9 @@ async def recognize_issuer_from_images(payload: IssuerRecognitionRequest) -> dic
             "item_id": saved.get("item_id"),
             "item_patch": saved.get("item_patch") or {},
             "company_info": saved.get("company_info") or {},
+            "warning": recognition.get("warning") or "",
+            "retry_used": bool(recognition.get("retry_used")),
+            "vision_model": recognition.get("model") or "",
             "image_urls": recognition.get("image_urls") or [],
         }
     except LLMClientError as exc:
@@ -844,6 +847,18 @@ def _guess_operating_revenue(value: object) -> str:
     return operating_revenue[:120] if operating_revenue else ""
 
 
+def _pick_business_data_field(company_info: dict[str, object], *keys: str) -> str:
+    business_data = company_info.get("business_data") if isinstance(company_info.get("business_data"), dict) else {}
+    for key in keys:
+        value = business_data.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
 def _pick_company_name(raw: dict[str, object], company_info: dict[str, object]) -> str:
     issuer_name = str(raw.get("issuer_full_name") or "").strip()
     if issuer_name:
@@ -981,9 +996,21 @@ async def analysis_lead_score() -> dict[str, object]:
         contact_name = _guess_contact_name(cleaned_company_info) or _guess_contact_name(cleaned_extra)
         phone = _guess_phone(cleaned_company_info) or _guess_phone(cleaned_extra)
         email = _guess_email(cleaned_company_info) or _guess_email(cleaned_extra)
-        employee_count = _guess_employee_count(cleaned_company_info) or _guess_employee_count(cleaned_extra)
-        operating_revenue = _guess_operating_revenue(cleaned_company_info) or _guess_operating_revenue(cleaned_extra)
-        insured_count = _guess_insured_count(cleaned_company_info) or _guess_insured_count(cleaned_extra)
+        employee_count = (
+            _pick_business_data_field(cleaned_company_info, "employees", "employees_text")
+            or _guess_employee_count(cleaned_company_info)
+            or _guess_employee_count(cleaned_extra)
+        )
+        operating_revenue = (
+            _pick_business_data_field(cleaned_company_info, "revenue_text")
+            or _guess_operating_revenue(cleaned_company_info)
+            or _guess_operating_revenue(cleaned_extra)
+        )
+        insured_count = (
+            _pick_business_data_field(cleaned_company_info, "insured_persons")
+            or _guess_insured_count(cleaned_company_info)
+            or _guess_insured_count(cleaned_extra)
+        )
 
         prepared_rows.append(
             {

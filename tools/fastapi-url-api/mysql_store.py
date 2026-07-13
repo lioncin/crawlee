@@ -128,6 +128,86 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
+def _pick_company_info_value(company_info: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = company_info.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _normalize_company_info_fields(company_info: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(company_info, dict):
+        return {}
+
+    normalized = dict(company_info)
+
+    normalized["issuer_full_name"] = _pick_company_info_value(
+        normalized,
+        "issuer_full_name",
+        "company_name",
+        "name",
+    )
+    normalized["company_name"] = _pick_company_info_value(
+        normalized,
+        "company_name",
+        "issuer_full_name",
+        "name",
+    )
+
+    normalized["contact_name"] = _pick_company_info_value(normalized, "contact_name", "contact", "contact_person")
+    normalized["phone"] = _pick_company_info_value(normalized, "phone", "telephone", "mobile")
+    normalized["email"] = _pick_company_info_value(normalized, "email", "mail")
+
+    normalized["employee_count"] = _pick_company_info_value(
+        normalized,
+        "employee_count",
+        "employees_text",
+        "employees",
+        "staff_count",
+        "employee_num",
+        "staff_num",
+    )
+    normalized["operating_revenue"] = _pick_company_info_value(
+        normalized,
+        "operating_revenue",
+        "revenue_text",
+        "revenue",
+        "annual_revenue",
+        "business_revenue",
+    )
+    normalized["insured_count"] = _pick_company_info_value(
+        normalized,
+        "insured_count",
+        "insured_persons",
+        "branch_insured_persons",
+        "insured_num",
+        "social_security_count",
+    )
+
+    certificates = normalized.get("certificates")
+    if certificates is None:
+        certificates = normalized.get("company_certificate")
+    if isinstance(certificates, dict):
+        certificates = [certificates]
+    if not isinstance(certificates, list):
+        certificates = []
+    normalized["certificates"] = [x for x in certificates if isinstance(x, dict)]
+
+    parsed_employee = _to_int(normalized.get("employee_count"))
+    if parsed_employee is not None:
+        normalized["employee_count"] = str(parsed_employee)
+
+    parsed_insured = _to_int(normalized.get("insured_count"))
+    if parsed_insured is not None:
+        normalized["insured_count"] = str(parsed_insured)
+
+    return normalized
+
+
 def _upsert_company_profile(cur, item_id: int, source_url: str, notice_url: str, parsed: dict[str, Any], company_info: dict[str, Any]) -> int:
     basic_info = parsed.get("basic_info") if isinstance(parsed.get("basic_info"), dict) else {}
     contact_info = parsed.get("contact_info") if isinstance(parsed.get("contact_info"), dict) else {}
@@ -720,6 +800,7 @@ def save_issuer_recognition_result(
     parsed = recognition_payload.get("parsed") if isinstance(recognition_payload, dict) else None
     parsed = parsed if isinstance(parsed, dict) else {}
     company_info = parsed.get("company_info") if isinstance(parsed.get("company_info"), dict) else {}
+    company_info = _normalize_company_info_fields(company_info)
 
     # Keep a display patch aligned with UI columns.
     patch: dict[str, Any] = {}
@@ -794,6 +875,7 @@ def save_issuer_recognition_result(
             merged_extra.update(
                 {
                     "ai_recognition": parsed if parsed else None,
+                    "ai_company_info": company_info,
                     "ai_image_urls": recognition_payload.get("image_urls") or [],
                     "ai_model": recognition_payload.get("model"),
                     "ai_raw_text": recognition_payload.get("raw_text"),
@@ -848,6 +930,32 @@ def save_issuer_recognition_result(
                     """,
                     (item_id, field_key, field_value, field_type),
                 )
+
+            company_profile_id = _upsert_company_profile(
+                cur,
+                item_id=item_id,
+                source_url=safe_source_url,
+                notice_url=safe_notice_url,
+                parsed=parsed,
+                company_info=company_info,
+            )
+            company_registry_profile_id = _upsert_company_registry_profile(
+                cur,
+                company_profile_id=company_profile_id,
+                item_id=item_id,
+                parsed=parsed,
+            )
+            certificate_count = _upsert_company_certificates(
+                cur,
+                company_profile_id=company_profile_id,
+                item_id=item_id,
+                parsed=parsed,
+                company_info=company_info,
+            )
+
+            patch["employee_count"] = str(company_info.get("employee_count") or "").strip() or None
+            patch["operating_revenue"] = str(company_info.get("operating_revenue") or "").strip() or None
+            patch["insured_count"] = str(company_info.get("insured_count") or "").strip() or None
 
         conn.commit()
 

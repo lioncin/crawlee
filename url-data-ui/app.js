@@ -361,7 +361,7 @@ async function recognizeUploadedImages(imageUrls) {
             notice_url: ctx.noticeUrl,
             issuer_name: ctx.issuerName || '',
             image_urls: imageUrls,
-            timeout_seconds: 180,
+            timeout_seconds: 420,
         }),
     });
 
