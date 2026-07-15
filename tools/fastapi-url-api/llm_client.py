@@ -443,6 +443,93 @@ async def extract_issuer_names_from_titles(titles: list[str], timeout_seconds: f
     return normalized
 
 
+def _notice_fields_from_value(value: object) -> dict[str, str | None]:
+    issuer_full_name: str | None = None
+    audit_status: str | None = None
+
+    if isinstance(value, dict):
+        for key in ("issuer_full_name", "issuer", "company_name", "name"):
+            raw = value.get(key)
+            if isinstance(raw, str) and raw.strip():
+                issuer_full_name = raw.strip()
+                break
+
+        raw_status = value.get("audit_status")
+        if isinstance(raw_status, str) and raw_status.strip():
+            audit_status = raw_status.strip()
+
+    return {
+        "issuer_full_name": issuer_full_name,
+        "audit_status": audit_status,
+    }
+
+
+async def extract_notice_fields_from_titles(rows: list[dict[str, object]], timeout_seconds: float = 30.0) -> list[dict[str, str | None]]:
+    if not rows:
+        return []
+
+    input_rows = []
+    for idx, row in enumerate(rows):
+        input_rows.append(
+            {
+                "index": idx,
+                "title": str(row.get("title") or ""),
+                "current_audit_status": str(row.get("audit_status") or ""),
+            }
+        )
+
+    prompt = f"""
+你是信息抽取助手。请从每条记录中只提取两个字段：发行人公司全称(issuer_full_name)和审核状态(audit_status)。
+规则：
+1) issuer_full_name：从 title 中识别发行人公司全称；如果无法明确识别，返回 null；
+2) audit_status：优先使用输入里的 current_audit_status，并规范为 已受理、已问询、上市委会议、提交注册、注册结果、中止、终止 之一；如果无法明确识别，返回 null；
+3) 仅返回 JSON，不要额外解释；
+4) 返回格式必须是 JSON 数组，长度与输入一致；
+5) 每个元素只允许包含 index、issuer_full_name、audit_status。
+推荐输出格式：
+[
+  {{"index": 0, "issuer_full_name": "...", "audit_status": "已问询"}},
+  {{"index": 1, "issuer_full_name": null, "audit_status": null}}
+]
+输入：
+{json.dumps(input_rows, ensure_ascii=False)}
+""".strip()
+
+    raw = await chat_completion(prompt, timeout_seconds=timeout_seconds)
+    cleaned = _strip_code_fence(raw)
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise LLMClientError(f"Failed to parse LLM notice fields JSON: {exc}") from exc
+
+    if isinstance(data, dict) and isinstance(data.get("items"), list):
+        data = data["items"]
+
+    if not isinstance(data, list):
+        raise LLMClientError("LLM notice fields response must be a JSON array")
+
+    normalized: list[dict[str, str | None]] = [
+        {"issuer_full_name": None, "audit_status": None} for _ in rows
+    ]
+
+    has_indexed_rows = any(isinstance(row, dict) and isinstance(row.get("index"), int) for row in data)
+    if has_indexed_rows:
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            idx = row.get("index")
+            if not isinstance(idx, int) or idx < 0 or idx >= len(rows):
+                continue
+            normalized[idx] = _notice_fields_from_value(row)
+        return normalized
+
+    for idx, value in enumerate(data[: len(rows)]):
+        normalized[idx] = _notice_fields_from_value(value)
+
+    return normalized
+
+
 def provider_config_text() -> str:
     return "\n".join(
         [

@@ -620,6 +620,7 @@ def _insert_crawl_record(cur, source_id: int, page_data: dict[str, Any]) -> int:
 def _upsert_item(cur, record_id: int, source_url: str, item: dict[str, Any]) -> int:
     title = str(item.get("title") or "").strip()
     notice_url = str(item.get("url") or "").strip()
+    audit_status = str(item.get("audit_status") or "").strip()
     item_date = _parse_date(item.get("date"))
 
     digest_raw = f"{source_url}|{notice_url}|{item_date or ''}|{title}"
@@ -645,13 +646,14 @@ def _upsert_item(cur, record_id: int, source_url: str, item: dict[str, Any]) -> 
     cur.execute(
         """
         INSERT INTO entity_item (
-          record_id, biz_key, title, url, issuer_full_name, item_date, extra
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+          record_id, biz_key, title, url, issuer_full_name, audit_status, item_date, extra
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE
           record_id = VALUES(record_id),
           title = VALUES(title),
           url = VALUES(url),
           issuer_full_name = VALUES(issuer_full_name),
+          audit_status = VALUES(audit_status),
           item_date = VALUES(item_date),
           extra = VALUES(extra),
           item_id = LAST_INSERT_ID(item_id),
@@ -663,6 +665,7 @@ def _upsert_item(cur, record_id: int, source_url: str, item: dict[str, Any]) -> 
             title or None,
             notice_url or None,
             (item.get("issuer_full_name") or None),
+            audit_status or None,
             item_date,
             _to_json(extra) if extra else None,
         ),
@@ -752,11 +755,12 @@ def _hydrate_page_items_from_entity(cur, source_url: str, page_payload: dict[str
     placeholders = ",".join(["%s"] * len(notice_urls))
     cur.execute(
         f"""
-        SELECT x.notice_url, x.issuer_full_name, x.extra
+        SELECT x.notice_url, x.issuer_full_name, x.audit_status, x.extra
         FROM (
           SELECT
             ei.url AS notice_url,
             ei.issuer_full_name,
+            ei.audit_status,
             ei.extra,
             ROW_NUMBER() OVER (
               PARTITION BY ei.url
@@ -790,6 +794,10 @@ def _hydrate_page_items_from_entity(cur, source_url: str, page_payload: dict[str
         issuer_name = (row.get("issuer_full_name") or "").strip()
         if issuer_name:
             item["issuer_full_name"] = issuer_name
+
+        audit_status = (row.get("audit_status") or "").strip()
+        if audit_status:
+            item["audit_status"] = audit_status
 
         row_extra = _loads_json(row.get("extra"))
         if not isinstance(row_extra, dict):
@@ -1094,6 +1102,7 @@ def load_ai_analysis_candidates(limit: int = 2000) -> list[dict[str, Any]]:
                   ei.item_id,
                   ei.title,
                   ei.issuer_full_name,
+                  ei.audit_status,
                   ei.item_date,
                   ei.extra,
                   sc.source_url,
@@ -1129,6 +1138,7 @@ def load_ai_analysis_candidates(limit: int = 2000) -> list[dict[str, Any]]:
                 "source_url": str(row.get("source_url") or ""),
                 "title": str(row.get("title") or ""),
                 "issuer_full_name": str(row.get("issuer_full_name") or "").strip(),
+                "audit_status": str(row.get("audit_status") or "").strip(),
                 "item_date": item_date.isoformat() if item_date else "",
                 "company_info": company_info,
                 "extra": extra_obj,

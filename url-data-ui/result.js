@@ -17,7 +17,7 @@ toast.className = 'copy-toast';
 document.body.appendChild(toast);
 let toastTimer = null;
 
-const BASE_COLUMNS = ['date', 'title', 'url'];
+const BASE_COLUMNS = ['date', 'title', 'audit_status'];
 const GRADE_ORDER = ['A', 'B', 'C', 'D'];
 let aiAnalysisRows = [];
 
@@ -28,7 +28,7 @@ const COLUMN_LABELS = {
     tags: '标签',
     issuer_full_name: '公司名称',
     board: '板块',
-    audit_status: '审核状态',
+    audit_status: '状态',
     province: '省份',
     industry: '行业',
     sponsor: '保荐机构',
@@ -223,8 +223,7 @@ function renderItemsTable(items) {
         return '<p class="empty">无 items 数据</p>';
     }
 
-    const dynamicColumns = getDynamicColumns(items);
-    const columns = [...BASE_COLUMNS, ...dynamicColumns];
+    const columns = BASE_COLUMNS;
 
     const header = columns.map((col) => `<th>${escapeHtml(englishKeyToChineseLabel(col))}</th>`).join('');
     const body = items

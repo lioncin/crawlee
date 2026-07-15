@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS entity_item (
   title VARCHAR(512) NULL,
   url VARCHAR(1024) NULL,
   issuer_full_name VARCHAR(256) NULL,
+  audit_status VARCHAR(64) NULL,
   item_date DATE NULL,
   extra JSON NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -43,6 +44,7 @@ CREATE TABLE IF NOT EXISTS entity_item (
   UNIQUE KEY uk_biz_key (biz_key),
   INDEX idx_record_id (record_id),
   INDEX idx_issuer_name (issuer_full_name),
+  INDEX idx_audit_status (audit_status),
   INDEX idx_item_date (item_date),
   CONSTRAINT fk_item_record FOREIGN KEY (record_id) REFERENCES crawl_record(record_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -8,7 +8,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from html import unescape
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
 import oss2
@@ -17,7 +17,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from llm_client import LLMClientError, chat_completion, extract_issuer_names_from_titles, recognize_company_from_images
+from llm_client import LLMClientError, chat_completion, extract_notice_fields_from_titles, recognize_company_from_images
 from mysql_store import load_ai_analysis_candidates, load_latest_ai_analysis_results, load_latest_results_from_mysql, replace_ai_analysis_results, save_issuer_recognition_result, store_fetch_result
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
@@ -33,12 +33,48 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+SSE_IPO_PAGE_SIZE = 25
+LLM_ISSUER_BATCH_SIZE = 25
+
+
+def build_sse_ipo_query_url(page_no: int, curr_status: str, callback: str, timestamp: str) -> str:
+    return (
+        "https://query.sse.com.cn/commonSoaQuery.do"
+        f"?jsonCallBack={callback}"
+        "&sqlId=SH_XM_LB"
+        "&keyword="
+        "&issueMarketType=1,2"
+        f"&currStatus={curr_status}"
+        "&province="
+        "&csrcCode="
+        "&auditApplyDateBegin="
+        "&auditApplyDateEnd="
+        "&order=updateDate|desc,stockAuditNum|desc"
+        "&isPagination=true"
+        "&pageHelp.cacheSize=1"
+        f"&pageHelp.beginPage={page_no}"
+        f"&pageHelp.endPage={page_no}"
+        f"&pageHelp.pageSize={SSE_IPO_PAGE_SIZE}"
+        f"&pageHelp.pageNo={page_no}"
+        f"&_={timestamp}"
+    )
+
+
+SSE_IPO_QUERY_URLS = [
+    build_sse_ipo_query_url(2, "1", "jsonpCallback93695872", "1784079371530"),
+    build_sse_ipo_query_url(1, "1", "jsonpCallback65633906", "1784079371531"),
+    build_sse_ipo_query_url(3, "2", "jsonpCallback30911885", "1784079371534"),
+    build_sse_ipo_query_url(2, "2", "jsonpCallback65582598", "1784079371535"),
+    build_sse_ipo_query_url(1, "2", "jsonpCallback23548945", "1784079371536"),
+]
+SSE_IPO_QUERY_URL = SSE_IPO_QUERY_URLS[0]
+
 # Fixed target URLs. `url: "*"` will fetch all of them.
 FIXED_URLS = [
-    "https://www.szse.cn/disclosure/notice/company/index.html",
-    "https://www.sse.com.cn/listing/renewal/ipo/",
-    "https://www2.hkexnews.hk/New-Listings/New-Listing-Information/Main-Board?sc_lang=zh-HK",
-    "https://www.cninfo.com.cn/new/index",
+    # "https://www.szse.cn/disclosure/notice/company/index.html",
+    *SSE_IPO_QUERY_URLS,
+    # "https://www2.hkexnews.hk/New-Listings/New-Listing-Information/Main-Board?sc_lang=zh-HK",
+    # "https://www.cninfo.com.cn/new/index",
 ]
 
 OSS_ENDPOINT = os.getenv("OSS_ENDPOINT", "https://oss-cn-hangzhou.aliyuncs.com")
@@ -76,6 +112,7 @@ class NoticeItem(BaseModel):
     title: str
     url: str
     issuer_full_name: str | None = None
+    llm_issuer_full_name: str | None = None
     board: str | None = None
     audit_status: str | None = None
     province: str | None = None
@@ -201,6 +238,13 @@ def is_sse_listing_ipo(url: str) -> bool:
     parsed = urlparse(url)
     return parsed.netloc.endswith("sse.com.cn") and parsed.path.startswith("/listing/renewal/ipo")
 
+def is_sse_common_soa_query(url: str) -> bool:
+    parsed = urlparse(url)
+    if not parsed.netloc.endswith("sse.com.cn") or parsed.path != "/commonSoaQuery.do":
+        return False
+    query = parse_qs(parsed.query)
+    return query.get("sqlId", [""])[0] == "SH_XM_LB"
+
 def is_hkex_new_listing_info(url: str) -> bool:
     parsed = urlparse(url)
     return parsed.netloc.endswith("hkexnews.hk") and parsed.path.startswith("/New-Listings/New-Listing-Information/Main-Board")
@@ -234,6 +278,13 @@ def get_intermediary_name(intermediary: list[dict], intermediary_type: int) -> s
 def map_curr_status(row: dict) -> str:
     code = str(row.get("currStatus") or "")
     return _CURR_STATUS_MAP.get(code, code)
+
+def sse_query_headers() -> dict[str, str]:
+    return {
+        "Referer": "https://www.sse.com.cn/listing/renewal/ipo/",
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "*/*",
+    }
 
 def clean_html_fragment(fragment: str) -> str:
     no_tags = _STRIP_TAGS_RE.sub(" ", fragment)
@@ -391,59 +442,66 @@ def extract_cninfo_latest_notice_items(html: str, base_url: str) -> list[NoticeI
     return items
 
 
-async def fill_missing_issuer_full_name(items: list[NoticeItem]) -> None:
-    missing_indexes: list[int] = []
-    missing_titles: list[str] = []
+async def fill_notice_fields_with_llm(items: list[NoticeItem], force_llm: bool = False) -> None:
+    target_indexes: list[int] = []
+    target_rows: list[dict[str, object]] = []
 
     for idx, item in enumerate(items):
-        if item.issuer_full_name and item.issuer_full_name.strip():
+        if not force_llm and item.issuer_full_name and item.issuer_full_name.strip() and item.audit_status and item.audit_status.strip():
             continue
         if not item.title or not item.title.strip():
             continue
-        missing_indexes.append(idx)
-        missing_titles.append(item.title.strip())
+        target_indexes.append(idx)
+        target_rows.append(
+            {
+                "title": item.title.strip(),
+                "audit_status": item.audit_status or "",
+            }
+        )
 
-    if not missing_titles:
+    if not target_rows:
         return
 
+    inferred_all: list[dict[str, str | None]] = []
     try:
-        inferred = await extract_issuer_names_from_titles(missing_titles)
-    except LLMClientError:
+        for start in range(0, len(target_rows), LLM_ISSUER_BATCH_SIZE):
+            batch = target_rows[start : start + LLM_ISSUER_BATCH_SIZE]
+            inferred_all.extend(await extract_notice_fields_from_titles(batch, timeout_seconds=60.0))
+    except LLMClientError as exc:
+        logger.warning("LLM notice fields extraction failed: %s", exc)
         return
 
-    for idx, issuer_name in zip(missing_indexes, inferred):
+    for idx, fields in zip(target_indexes, inferred_all):
+        issuer_name = fields.get("issuer_full_name")
         if issuer_name and issuer_name.strip():
-            items[idx].issuer_full_name = issuer_name.strip()
+            clean_name = issuer_name.strip()
+            items[idx].llm_issuer_full_name = clean_name
+            items[idx].issuer_full_name = clean_name
+        audit_status = fields.get("audit_status")
+        if audit_status and audit_status.strip():
+            items[idx].audit_status = audit_status.strip()
 
 
 async def fetch_sse_ipo_items(client: httpx.AsyncClient) -> list[NoticeItem]:
-    params = {
-        "jsonCallBack": "cb",
-        "sqlId": "SH_XM_LB",
-        "keyword": "",
-        "issueMarketType": "1,2",
-        "currStatus": "",
-        "province": "",
-        "csrcCode": "",
-        "auditApplyDateBegin": "",
-        "auditApplyDateEnd": "",
-        "order": "updateDate|desc,stockAuditNum|desc",
-        "isPagination": "true",
-        "pageHelp.cacheSize": "1",
-        "pageHelp.beginPage": "1",
-        "pageHelp.endPage": "1",
-        "pageHelp.pageSize": "25",
-        "pageHelp.pageNo": "1",
-    }
-    headers = {
-        "Referer": "https://www.sse.com.cn/listing/renewal/ipo/",
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "*/*",
-    }
+    items, _ = await fetch_sse_ipo_urls(client, SSE_IPO_QUERY_URLS)
+    return items
 
-    response = await client.get("https://query.sse.com.cn/commonSoaQuery.do", params=params, headers=headers)
-    body = response.text.strip()
 
+async def fetch_sse_ipo_urls(client: httpx.AsyncClient, urls: list[str]) -> tuple[list[NoticeItem], str]:
+    headers = sse_query_headers()
+    items: list[NoticeItem] = []
+    raw_bodies: list[str] = []
+
+    for url in urls:
+        response = await client.get(url, headers=headers)
+        raw_bodies.append(response.text)
+        items.extend(parse_sse_ipo_items_from_jsonp(response.text))
+
+    return items, "\n".join(raw_bodies)
+
+
+def parse_sse_ipo_items_from_jsonp(body: str) -> list[NoticeItem]:
+    body = body.strip()
     match = _JSONP_WRAP_RE.match(body)
     if not match:
         return []
@@ -500,12 +558,19 @@ async def fetch_one_url(
     target_url: str,
     include_html: bool,
 ) -> FetchResponse:
-    response = await client.get(target_url)
+    if is_sse_common_soa_query(target_url):
+        items, html = await fetch_sse_ipo_urls(client, [target_url])
+        final_url = target_url
+        status_code = 200
+    else:
+        response = await client.get(target_url)
 
-    html = response.text
-    final_url = str(response.url)
+        html = response.text
+        final_url = str(response.url)
+        status_code = response.status_code
 
-    items = extract_notice_items(html, final_url)
+        items = extract_notice_items(html, final_url)
+
     if not items and is_sse_listing_ipo(final_url):
         items = await fetch_sse_ipo_items(client)
     if not items and is_hkex_new_listing_info(final_url):
@@ -514,7 +579,7 @@ async def fetch_one_url(
         items = extract_cninfo_latest_notice_items(html, final_url)
 
     if items:
-        await fill_missing_issuer_full_name(items)
+        await fill_notice_fields_with_llm(items, force_llm=True)
 
     if items:
         lines = []
@@ -543,7 +608,7 @@ async def fetch_one_url(
     return FetchResponse(
         url=target_url,
         final_url=final_url,
-        status_code=response.status_code,
+        status_code=status_code,
         title=extract_title(html),
         html_length=len(html),
         text=text,
