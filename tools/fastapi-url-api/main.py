@@ -6,7 +6,7 @@ import logging
 import os
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from html import unescape
 from urllib.parse import parse_qs, urljoin, urlparse
 
@@ -35,6 +35,8 @@ app.add_middleware(
 
 SSE_IPO_PAGE_SIZE = 25
 LLM_ISSUER_BATCH_SIZE = 25
+DAILY_FETCH_TIME = time(hour=4, minute=30)
+_daily_fetch_task: asyncio.Task[None] | None = None
 
 
 def build_sse_ipo_query_url(page_no: int, curr_status: str, callback: str, timestamp: str) -> str:
@@ -710,6 +712,65 @@ async def fetch_one_url(
     )
 
 
+async def fetch_fixed_urls(timeout_seconds: float, include_html: bool = False) -> dict[str, FetchResponse]:
+    timeout = httpx.Timeout(timeout_seconds)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+        results: dict[str, FetchResponse] = {}
+        for target in FIXED_URLS:
+            results[target] = await fetch_one_url(client, target, include_html)
+
+    await asyncio.to_thread(
+        store_fetch_result,
+        "*",
+        {k: v.model_dump(mode="json") for k, v in results.items()},
+    )
+    return results
+
+
+def seconds_until_daily_fetch(now: datetime | None = None) -> float:
+    current = now or datetime.now()
+    next_run = datetime.combine(current.date(), DAILY_FETCH_TIME)
+    if next_run <= current:
+        next_run += timedelta(days=1)
+    return max(0.0, (next_run - current).total_seconds())
+
+
+async def daily_fixed_fetch_loop() -> None:
+    while True:
+        delay_seconds = seconds_until_daily_fetch()
+        next_run_at = datetime.now() + timedelta(seconds=delay_seconds)
+        logger.info("Next scheduled fixed URL fetch at %s", next_run_at.isoformat(timespec="seconds"))
+        await asyncio.sleep(delay_seconds)
+
+        try:
+            logger.info("Starting scheduled fixed URL fetch")
+            results = await fetch_fixed_urls(timeout_seconds=60.0, include_html=False)
+            total_items = sum(len(result.items) for result in results.values())
+            logger.info("Scheduled fixed URL fetch completed: urls=%s items=%s", len(results), total_items)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Scheduled fixed URL fetch failed")
+
+
+@app.on_event("startup")
+async def start_daily_fixed_fetch_task() -> None:
+    global _daily_fetch_task
+    if _daily_fetch_task is None or _daily_fetch_task.done():
+        _daily_fetch_task = asyncio.create_task(daily_fixed_fetch_loop())
+
+
+@app.on_event("shutdown")
+async def stop_daily_fixed_fetch_task() -> None:
+    if _daily_fetch_task is None:
+        return
+    _daily_fetch_task.cancel()
+    try:
+        await _daily_fetch_task
+    except asyncio.CancelledError:
+        pass
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -724,19 +785,10 @@ async def fetch_url(payload: FetchRequest) -> FetchResponse | dict[str, FetchRes
     timeout = httpx.Timeout(payload.timeout_seconds)
 
     try:
+        if url == "*":
+            return await fetch_fixed_urls(payload.timeout_seconds, payload.include_html)
+
         async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
-            if url == "*":
-                results: dict[str, FetchResponse] = {}
-                for target in FIXED_URLS:
-                    results[target] = await fetch_one_url(client, target, payload.include_html)
-
-                await asyncio.to_thread(
-                    store_fetch_result,
-                    url,
-                    {k: v.model_dump(mode="json") for k, v in results.items()},
-                )
-                return results
-
             if not is_valid_http_url(url):
                 raise HTTPException(status_code=422, detail="url must be a valid http/https URL or '*'")
 
