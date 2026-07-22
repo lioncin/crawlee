@@ -143,6 +143,16 @@ function setUploadUiState(uploading, message = '', type = '') {
     }
 }
 
+function normalizeEditStatus(value) {
+    return value || '未编辑';
+}
+
+function buildStatusBadge(editStatus) {
+    const status = normalizeEditStatus(editStatus);
+    const statusClass = status === '已编辑' ? 'edited' : 'unedited';
+    return `<span class="edit-status ${statusClass}">${escapeHtml(status)}</span>`;
+}
+
 function buildIssuerCell(cellValue, sourceUrl, noticeUrl) {
     const safeText = escapeHtml(cellValue);
     const copyAttr = encodeAttr(cellValue);
@@ -478,6 +488,7 @@ function renderResults(data) {
       <thead>
         <tr>
           <th>issuer_full_name</th>
+          <th>edit_status</th>
         </tr>
       </thead>
     `;
@@ -487,7 +498,7 @@ function renderResults(data) {
             const statusCode = detail?.status_code ?? '';
             const title = detail?.title ?? '';
             const htmlLength = detail?.html_length ?? '';
-            const rows = Array.isArray(detail?.rows) ? detail.rows : [];
+            const rows = Array.isArray(detail?.rows) ? detail.rows : Array.isArray(detail?.items) ? detail.items : [];
 
             if (rows.length === 0) {
                 return '';
@@ -497,9 +508,11 @@ function renderResults(data) {
                 .map((item, index) => {
                     const issuerName = item?.issuer_full_name ?? '';
                     const noticeUrl = item?.url ?? '';
+                    const editStatus = normalizeEditStatus(item?.edit_status);
                     return `
             <tr>
               ${buildIssuerCell(issuerName, sourceUrl, noticeUrl)}
+              <td>${buildStatusBadge(editStatus)}</td>
             </tr>
           `;
                 })

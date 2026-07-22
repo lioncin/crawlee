@@ -289,6 +289,29 @@ td a:hover {
   gap: 6px;
 }
 
+.edit-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 54px;
+  border: 1px solid rgba(75, 97, 89, 0.22);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 0.76rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.edit-status.edited {
+  color: var(--ok);
+  background: rgba(22, 101, 52, 0.1);
+}
+
+.edit-status.unedited {
+  color: var(--muted);
+  background: rgba(75, 97, 89, 0.08);
+}
+
 .copy-issuer {
   border: 0;
   background: transparent;

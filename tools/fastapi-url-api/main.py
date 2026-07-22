@@ -127,6 +127,7 @@ class NoticeItem(BaseModel):
     publish_time: str | None = None
     original_url: str | None = None
     source_name: str | None = None
+    edit_status: str | None = "未编辑"
 
 
 class FetchResponse(BaseModel):

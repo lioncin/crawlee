@@ -12,6 +12,9 @@ import pymysql
 
 logger = logging.getLogger(__name__)
 
+EDIT_STATUS_UNEDITED = "未编辑"
+EDIT_STATUS_EDITED = "已编辑"
+
 
 def _load_dotenv(env_path: Path) -> None:
     if not env_path.exists():
@@ -236,6 +239,15 @@ def _filter_new_company_items(cur, items: Any) -> list[dict[str, Any]]:
         filtered.append(item)
 
     return filtered
+
+
+def _with_default_edit_status(item: dict[str, Any]) -> dict[str, Any]:
+    if item.get("edit_status"):
+        return item
+
+    normalized = dict(item)
+    normalized["edit_status"] = EDIT_STATUS_UNEDITED
+    return normalized
 
 
 def _normalize_company_info_fields(company_info: dict[str, Any]) -> dict[str, Any]:
@@ -826,7 +838,10 @@ def store_fetch_result(request_url: str, result_payload: dict[str, Any]) -> None
                 if not isinstance(page_data, dict):
                     continue
 
-                filtered_items = _filter_new_company_items(cur, page_data.get("items"))
+                filtered_items = [
+                    _with_default_edit_status(item)
+                    for item in _filter_new_company_items(cur, page_data.get("items"))
+                ]
                 page_data = dict(page_data)
                 page_data["items"] = filtered_items
 
@@ -902,12 +917,14 @@ def _hydrate_page_items_from_entity(cur, source_url: str, page_payload: dict[str
 
         row_extra = _loads_json(row.get("extra"))
         if not isinstance(row_extra, dict):
+            item["edit_status"] = item.get("edit_status") or EDIT_STATUS_UNEDITED
             continue
 
         current_extra = item.get("extra")
         merged_extra = current_extra if isinstance(current_extra, dict) else {}
         merged_extra.update(row_extra)
         item["extra"] = merged_extra
+        item["edit_status"] = str(row_extra.get("edit_status") or item.get("edit_status") or EDIT_STATUS_UNEDITED)
 
         ai_recognition = row_extra.get("ai_recognition")
         if isinstance(ai_recognition, dict):
@@ -1061,6 +1078,7 @@ def save_issuer_recognition_result(
     certificates = company_info.get("certificates") if isinstance(company_info.get("certificates"), list) else None
     if certificates is not None:
         patch["certificates"] = certificates
+    patch["edit_status"] = EDIT_STATUS_EDITED
 
     with pymysql.connect(**cfg) as conn:
         with conn.cursor() as cur:
@@ -1102,6 +1120,7 @@ def save_issuer_recognition_result(
                     "ai_model": recognition_payload.get("model"),
                     "ai_raw_text": recognition_payload.get("raw_text"),
                     "ai_updated_at": datetime.now().isoformat(timespec="seconds"),
+                    "edit_status": EDIT_STATUS_EDITED,
                 }
             )
 
@@ -1113,9 +1132,13 @@ def save_issuer_recognition_result(
                     (patch.get("issuer_full_name"), item_id),
                 )
 
-            cur.execute("DELETE FROM entity_kv WHERE item_id = %s AND field_key LIKE 'ai_%%'", (item_id,))
+            cur.execute(
+                "DELETE FROM entity_kv WHERE item_id = %s AND (field_key LIKE 'ai_%%' OR field_key = 'edit_status')",
+                (item_id,),
+            )
 
             ai_kv_rows = [
+                ("edit_status", EDIT_STATUS_EDITED),
                 ("ai_company_info", company_info if isinstance(company_info, dict) else None),
                 ("ai_employee_count", company_info.get("employee_count") if isinstance(company_info, dict) else None),
                 ("ai_operating_revenue", company_info.get("operating_revenue") if isinstance(company_info, dict) else None),
