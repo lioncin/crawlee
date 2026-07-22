@@ -69,11 +69,16 @@ SSE_IPO_QUERY_URLS = [
 ]
 SSE_IPO_QUERY_URL = SSE_IPO_QUERY_URLS[0]
 
+PEDAILY_FINANCING_URLS = [
+    "https://www.pedaily.cn/first/t76/",
+    *[f"https://www.pedaily.cn/first/t76/{page_no}/" for page_no in range(2, 6)],
+]
+
 # Fixed target URLs. `url: "*"` will fetch all of them.
 FIXED_URLS = [
     # "https://www.szse.cn/disclosure/notice/company/index.html",
     *SSE_IPO_QUERY_URLS,
-    "https://www.pedaily.cn/first/t76/",
+    *PEDAILY_FINANCING_URLS,
     # "https://www2.hkexnews.hk/New-Listings/New-Listing-Information/Main-Board?sc_lang=zh-HK",
     # "https://www.cninfo.com.cn/new/index",
 ]
@@ -347,6 +352,9 @@ def extract_pedaily_first_items(html: str, base_url: str) -> list[NoticeItem]:
         publish_time = extract_first_match_text(_PEDAILY_TIME_RE, item_html)
         date = parse_pedaily_publish_date(publish_time)
         summary = extract_first_match_text(_PEDAILY_DESC_RE, item_html)
+        if "融资" not in title and "融资" not in summary:
+            continue
+
         issuer_name = extract_first_match_text(_PEDAILY_COMPANY_RE, item_html) or None
 
         original_url = None
