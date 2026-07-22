@@ -142,6 +142,102 @@ def _pick_company_info_value(company_info: dict[str, Any], *keys: str) -> str | 
     return None
 
 
+def _normalize_company_name(value: Any) -> str:
+    return " ".join(str(value or "").strip().split())
+
+
+def _get_item_company_name(item: dict[str, Any]) -> str:
+    company_name = _normalize_company_name(item.get("issuer_full_name"))
+    if company_name:
+        return company_name
+
+    company_name = _normalize_company_name(item.get("llm_issuer_full_name"))
+    if company_name:
+        return company_name
+
+    company_info = item.get("company_info")
+    if isinstance(company_info, dict):
+        for key in ("issuer_full_name", "company_name", "name"):
+            company_name = _normalize_company_name(company_info.get(key))
+            if company_name:
+                return company_name
+
+    return ""
+
+
+def _load_existing_company_names(cur, company_names: set[str]) -> set[str]:
+    if not company_names:
+        return set()
+
+    placeholders = ",".join(["%s"] * len(company_names))
+    existing_company_names: set[str] = set()
+
+    cur.execute(
+        f"""
+        SELECT DISTINCT issuer_full_name
+        FROM entity_item
+        WHERE issuer_full_name IN ({placeholders})
+        """,
+        tuple(company_names),
+    )
+    existing_company_names.update(
+        _normalize_company_name(row.get("issuer_full_name"))
+        for row in cur.fetchall() or []
+        if _normalize_company_name(row.get("issuer_full_name"))
+    )
+
+    for table_name in ("company_profile", "company_registry_profile"):
+        try:
+            cur.execute(
+                f"""
+                SELECT DISTINCT company_name
+                FROM {table_name}
+                WHERE company_name IN ({placeholders})
+                """,
+                tuple(company_names),
+            )
+        except pymysql.err.ProgrammingError as exc:
+            if exc.args and exc.args[0] == 1146:
+                continue
+            raise
+
+        existing_company_names.update(
+            _normalize_company_name(row.get("company_name"))
+            for row in cur.fetchall() or []
+            if _normalize_company_name(row.get("company_name"))
+        )
+
+    return existing_company_names
+
+
+def _filter_new_company_items(cur, items: Any) -> list[dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+
+    valid_items = [item for item in items if isinstance(item, dict)]
+    candidate_company_names = {
+        company_name
+        for item in valid_items
+        if (company_name := _get_item_company_name(item))
+    }
+    existing_company_names = _load_existing_company_names(cur, candidate_company_names)
+
+    filtered: list[dict[str, Any]] = []
+    seen_company_names: set[str] = set()
+
+    for item in valid_items:
+        company_name = _get_item_company_name(item)
+        if company_name:
+            if company_name in existing_company_names or company_name in seen_company_names:
+                logger.info("Skip existing company item: %s", company_name)
+                continue
+            seen_company_names.add(company_name)
+
+        filtered.append(item)
+
+    return filtered
+
+
 def _normalize_company_info_fields(company_info: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(company_info, dict):
         return {}
@@ -727,12 +823,17 @@ def store_fetch_result(request_url: str, result_payload: dict[str, Any]) -> None
     with pymysql.connect(**cfg) as conn:
         with conn.cursor() as cur:
             for source_url, page_data in _iter_pages(request_url, result_payload):
+                if not isinstance(page_data, dict):
+                    continue
+
+                filtered_items = _filter_new_company_items(cur, page_data.get("items"))
+                page_data = dict(page_data)
+                page_data["items"] = filtered_items
+
                 source_id = _upsert_source(cur, source_url)
                 record_id = _insert_crawl_record(cur, source_id, page_data)
 
-                for item in page_data.get("items") or []:
-                    if not isinstance(item, dict):
-                        continue
+                for item in filtered_items:
                     item_id = _upsert_item(cur, record_id, source_url, item)
                     _save_item_kv(cur, item_id, item)
 
