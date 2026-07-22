@@ -73,6 +73,7 @@ SSE_IPO_QUERY_URL = SSE_IPO_QUERY_URLS[0]
 FIXED_URLS = [
     # "https://www.szse.cn/disclosure/notice/company/index.html",
     *SSE_IPO_QUERY_URLS,
+    "https://www.pedaily.cn/first/t76/",
     # "https://www2.hkexnews.hk/New-Listings/New-Listing-Information/Main-Board?sc_lang=zh-HK",
     # "https://www.cninfo.com.cn/new/index",
 ]
@@ -122,6 +123,10 @@ class NoticeItem(BaseModel):
     accounting_firm: str | None = None
     update_date: str | None = None
     accept_date: str | None = None
+    summary: str | None = None
+    publish_time: str | None = None
+    original_url: str | None = None
+    source_name: str | None = None
 
 
 class FetchResponse(BaseModel):
@@ -157,6 +162,13 @@ _CNINFO_QUICK_TABLE_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _CNINFO_ANNOUNCEMENT_DATE_RE = re.compile(r"[?&]announcementTime=([0-9]{4}-[0-9]{2}-[0-9]{2})")
+_PEDAILY_ITEM_RE = re.compile(r"<li\b([^>]*\bdata-url\s*=\s*[\"\x27][^\"\x27]+[\"\x27][^>]*)>(.*?)</li>", re.IGNORECASE | re.DOTALL)
+_PEDAILY_ATTR_RE = re.compile(r"\b([a-zA-Z0-9_-]+)\s*=\s*[\"\x27]([^\"\x27]*)[\"\x27]", re.IGNORECASE)
+_PEDAILY_TIME_RE = re.compile(r"<span\b[^>]*class=\"[^\"]*\btime\b[^\"]*\bdate\b[^\"]*\"[^>]*>(.*?)</span>", re.IGNORECASE | re.DOTALL)
+_PEDAILY_DESC_RE = re.compile(r"<div\b[^>]*class=\"[^\"]*\btxt\b[^\"]*\"[^>]*>(.*?)</div>", re.IGNORECASE | re.DOTALL)
+_PEDAILY_COMPANY_RE = re.compile(r"<span\b[^>]*class=\"[^\"]*\bcom\b[^\"]*\"[^>]*>.*?<a\b[^>]*>(.*?)</a>", re.IGNORECASE | re.DOTALL)
+_PEDAILY_MORE_LINK_RE = re.compile(r"<a\b(?=[^>]*class=\"[^\"]*\bmore\b[^\"]*\")([^>]*)>", re.IGNORECASE | re.DOTALL)
+_PEDAILY_H3_RE = re.compile(r"<h3\b[^>]*>(.*?)</h3>", re.IGNORECASE | re.DOTALL)
 
 _ISSUE_MARKET_MAP = {
     "1": "科创板",
@@ -254,6 +266,11 @@ def is_cninfo_index(url: str) -> bool:
     return parsed.netloc.endswith("cninfo.com.cn") and parsed.path.startswith("/new/index")
 
 
+def is_pedaily_first(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.netloc.endswith("pedaily.cn") and parsed.path.startswith("/first/")
+
+
 def is_valid_http_url(url: str) -> bool:
     parsed = urlparse(url)
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
@@ -290,6 +307,70 @@ def clean_html_fragment(fragment: str) -> str:
     no_tags = _STRIP_TAGS_RE.sub(" ", fragment)
     decoded = unescape(no_tags).replace("\xa0", " ")
     return re.sub(r"\s+", " ", decoded).strip()
+
+
+def parse_html_attrs(attrs: str) -> dict[str, str]:
+    return {name.lower(): unescape(value).strip() for name, value in _PEDAILY_ATTR_RE.findall(attrs)}
+
+
+def extract_first_match_text(pattern: re.Pattern[str], html: str) -> str:
+    match = pattern.search(html)
+    if not match:
+        return ""
+    return clean_html_fragment(match.group(1))
+
+
+def parse_pedaily_publish_date(publish_time: str) -> str:
+    match = re.search(r"(20[0-9]{2})-([01][0-9])-([0-3][0-9])", publish_time)
+    if not match:
+        return ""
+    year, month, day = match.groups()
+    return f"{year}-{month}-{day}"
+
+
+def extract_pedaily_first_items(html: str, base_url: str) -> list[NoticeItem]:
+    items: list[NoticeItem] = []
+    seen_links: set[str] = set()
+
+    for attrs_html, item_html in _PEDAILY_ITEM_RE.findall(html):
+        attrs = parse_html_attrs(attrs_html)
+        detail_url = urljoin(base_url, attrs.get("data-url", ""))
+        if not detail_url or detail_url in seen_links:
+            continue
+        seen_links.add(detail_url)
+
+        title = attrs.get("data-title") or extract_first_match_text(_PEDAILY_H3_RE, item_html)
+        if not title:
+            continue
+
+        publish_time = extract_first_match_text(_PEDAILY_TIME_RE, item_html)
+        date = parse_pedaily_publish_date(publish_time)
+        summary = extract_first_match_text(_PEDAILY_DESC_RE, item_html)
+        issuer_name = extract_first_match_text(_PEDAILY_COMPANY_RE, item_html) or None
+
+        original_url = None
+        original_match = _PEDAILY_MORE_LINK_RE.search(item_html)
+        if original_match:
+            original_attrs = parse_html_attrs(original_match.group(1))
+            original_url = urljoin(base_url, original_attrs.get("href", ""))
+
+        items.append(
+            NoticeItem(
+                date=date,
+                title=title,
+                url=detail_url,
+                issuer_full_name=issuer_name,
+                board="投资界融资",
+                audit_status="融资快讯",
+                update_date=date or None,
+                summary=summary or None,
+                publish_time=publish_time or None,
+                original_url=original_url,
+                source_name="投资界",
+            )
+        )
+
+    return items
 
 
 def parse_hkex_updated_date(html: str) -> str:
@@ -577,6 +658,8 @@ async def fetch_one_url(
         items = extract_hkex_main_board_items(html, final_url)
     if not items and is_cninfo_index(final_url):
         items = extract_cninfo_latest_notice_items(html, final_url)
+    if not items and is_pedaily_first(final_url):
+        items = extract_pedaily_first_items(html, final_url)
 
     if items:
         await fill_notice_fields_with_llm(items, force_llm=True)
@@ -598,6 +681,7 @@ async def fetch_one_url(
                         item.accounting_firm or "",
                         item.accept_date or "",
                         item.url,
+                        item.summary or "",
                     ]
                 )
             )

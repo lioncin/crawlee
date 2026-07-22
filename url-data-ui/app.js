@@ -31,6 +31,10 @@ const ITEM_COLUMNS = [
     'accounting_firm',
     'update_date',
     'accept_date',
+    'publish_time',
+    'summary',
+    'original_url',
+    'source_name',
 ];
 
 const COMPANY_INFO_COLUMNS = [
@@ -157,7 +161,7 @@ function renderItemsTable(items, sourceUrl) {
         .map((item) => {
             const cells = ITEM_COLUMNS.map((col) => {
                 const cellValue = item?.[col] ?? '';
-                if (col === 'url' && cellValue) {
+                if ((col === 'url' || col === 'original_url') && cellValue) {
                     const safeUrl = escapeHtml(cellValue);
                     return `<td><a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeUrl}</a></td>`;
                 }
