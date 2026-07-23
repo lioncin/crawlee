@@ -1,7 +1,7 @@
 // const backendUrl = '/crawlee-api/results/mysql';
 const backendUrl = 'http://127.0.0.1:8765/results/mysql';
 const aiAnalysisUrl = 'http://127.0.0.1:8765/analysis/lead-score';
-const crmClueCreateUrl = 'http://localhost:48081/admin-api/crm/clues/third-party/create';
+const crmClueCreateUrl = 'https://crm.inlink-ai.com/admin-api/crm/clues/third-party/create';
 
 const statusText = document.getElementById('statusText');
 const resultTables = document.getElementById('resultTables');
