@@ -1,10 +1,12 @@
 // const backendUrl = '/crawlee-api/results/mysql';
 const backendUrl = 'http://127.0.0.1:8765/results/mysql';
 const aiAnalysisUrl = 'http://127.0.0.1:8765/analysis/lead-score';
+const crmClueCreateUrl = 'http://localhost:48081/admin-api/crm/clues/third-party/create';
 
 const statusText = document.getElementById('statusText');
 const resultTables = document.getElementById('resultTables');
 const aiAnalyzeBtn = document.getElementById('aiAnalyzeBtn');
+const syncToCrmBtn = document.getElementById('syncToCrmBtn');
 const aiStatusText = document.getElementById('aiStatusText');
 const aiResultBoard = document.getElementById('aiResultBoard');
 const aiCompanySearch = document.getElementById('aiCompanySearch');
@@ -19,6 +21,7 @@ let toastTimer = null;
 
 const BASE_COLUMNS = ['date', 'title', 'audit_status'];
 const GRADE_ORDER = ['A', 'B', 'C', 'D'];
+const CRM_LEVEL_BY_GRADE = { A: 4, B: 3, C: 2, D: 1 };
 let aiAnalysisRows = [];
 
 const COLUMN_LABELS = {
@@ -562,6 +565,75 @@ function exportAiCsv() {
     showCopyToast(`已导出 ${rows.length} 条数据`);
 }
 
+function buildCrmClue(row) {
+    const remarkParts = [];
+    if (row.certificate_industries) {
+        remarkParts.push(`资质证书行业：${row.certificate_industries}`);
+    }
+    if (row.reason) {
+        remarkParts.push(`AI评级理由：${row.reason}`);
+    }
+
+    return {
+        name: row.company_name,
+        level: CRM_LEVEL_BY_GRADE[normalizeGrade(row.grade)],
+        tags: row.employee_count || undefined,
+        source: 4,
+        remark: remarkParts.join('；') || undefined,
+        thirdPartySource: 'AI分析',
+    };
+}
+
+async function syncAiResultsToCrm() {
+    if (!syncToCrmBtn) {
+        return;
+    }
+
+    const rows = getFilteredAiRows().filter((row) => row.company_name);
+    if (!rows.length) {
+        showCopyToast('暂无可同步的AI结果');
+        return;
+    }
+
+    syncToCrmBtn.disabled = true;
+    let succeeded = 0;
+    let failed = 0;
+
+    try {
+        for (let index = 0; index < rows.length; index += 1) {
+            setAiStatus(`同步CRM中（${index + 1}/${rows.length}）...`);
+
+            try {
+                const response = await fetch(crmClueCreateUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'tenant-id': '1',
+                    },
+                    body: JSON.stringify(buildCrmClue(rows[index])),
+                });
+
+                if (!response.ok) {
+                    throw new Error(`请求失败 ${response.status}`);
+                }
+
+                succeeded += 1;
+            } catch (error) {
+                console.error('CRM同步失败', rows[index].company_name, error);
+                failed += 1;
+            }
+        }
+
+        if (failed === 0) {
+            setAiStatus(`已同步 ${succeeded} 条到CRM`, 'ok');
+        } else {
+            setAiStatus(`同步完成：成功 ${succeeded} 条，失败 ${failed} 条`, 'err');
+        }
+    } finally {
+        syncToCrmBtn.disabled = false;
+    }
+}
+
 async function runAiAnalysis() {
     if (!aiAnalyzeBtn || !aiResultBoard) {
         return;
@@ -610,6 +682,16 @@ function bindAiAnalyzeEvent() {
 
     aiAnalyzeBtn.addEventListener('click', () => {
         runAiAnalysis();
+    });
+}
+
+function bindSyncToCrmEvent() {
+    if (!syncToCrmBtn) {
+        return;
+    }
+
+    syncToCrmBtn.addEventListener('click', () => {
+        syncAiResultsToCrm();
     });
 }
 
@@ -692,6 +774,7 @@ async function loadSavedAiAnalysis() {
 
 async function initPage() {
     bindAiAnalyzeEvent();
+    bindSyncToCrmEvent();
     bindAiFilterEvents();
     await loadSavedAiAnalysis();
     await loadResults();
