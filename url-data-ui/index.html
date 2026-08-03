@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>URL 查询面板</title>
+    <title>同泽CRM 数据抓取</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -16,7 +16,21 @@
     <main class="page">
       <section class="panel hero">
         <p class="kicker">Data Console</p>
-        <h1>交易所 URL 查询与结果展示</h1>
+        <h1>同泽CRM 数据抓取</h1>
+      </section>
+      <section class="panel source-panel">
+        <div class="result-head">
+          <h2>本次数据抓取 URL</h2>
+          <span id="sourceStatusText" class="status"></span>
+        </div>
+        <form id="sourceForm" class="source-form">
+          <input id="sourceName" type="text" maxlength="128" placeholder="数据源名称，例如：上交所 IPO" required />
+          <input id="sourceUrl" type="url" maxlength="2048" placeholder="https://example.com/list" required />
+          <label class="source-active"><input id="sourceActive" type="checkbox" checked /> 启用抓取</label>
+          <button id="sourceSaveBtn" type="submit">新增 URL</button>
+          <button id="sourceCancelBtn" type="button" class="secondary-btn" hidden>取消编辑</button>
+        </form>
+        <div id="sourceList" class="source-list"><p class="empty">正在加载数据源...</p></div>
       </section>
       <div class="actions-row">
         <button id="startQueryBtn" type="button">查询</button>

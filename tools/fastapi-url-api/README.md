@@ -32,6 +32,20 @@ uvicorn main:app --host 0.0.0.0 --port 8765 --reload
 
 ## URL Fetch API
 
+Manage the URLs included in a wildcard fetch (`{"url":"*"}`) through the API or the data-console UI:
+
+```bash
+# List configured URLs (10 records per page by default)
+curl 'http://127.0.0.1:8765/crawl-targets?page=1&per_page=10'
+
+# Add a URL
+curl -X POST 'http://127.0.0.1:8765/crawl-targets' \
+  -H 'content-type: application/json' \
+  -d '{"name":"上交所 IPO","url":"https://example.com/list","is_active":true}'
+```
+
+Only enabled URLs are fetched. An empty list stays empty; URLs are never automatically restored after deletion or `TRUNCATE`.
+
 Return extracted content (default):
 
 ```bash

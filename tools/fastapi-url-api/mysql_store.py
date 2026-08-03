@@ -16,6 +16,133 @@ EDIT_STATUS_UNEDITED = "未编辑"
 EDIT_STATUS_EDITED = "已编辑"
 
 
+def _ensure_crawl_target_table(cur) -> None:
+    """Create the managed crawl-target table for installations upgraded in place."""
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS crawl_target (
+          target_id BIGINT PRIMARY KEY AUTO_INCREMENT,
+          name VARCHAR(128) NOT NULL,
+          target_url VARCHAR(2048) NOT NULL,
+          is_active TINYINT(1) NOT NULL DEFAULT 1,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          UNIQUE KEY uk_crawl_target_url (target_url(255)),
+          INDEX idx_crawl_target_active (is_active)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+
+
+def _target_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": int(row["target_id"]),
+        "name": str(row["name"]),
+        "url": str(row["target_url"]),
+        "is_active": bool(row["is_active"]),
+        "created_at": row.get("created_at").isoformat(sep=" ") if row.get("created_at") else None,
+        "updated_at": row.get("updated_at").isoformat(sep=" ") if row.get("updated_at") else None,
+    }
+
+
+def list_crawl_targets() -> list[dict[str, Any]]:
+    """Return the URL targets explicitly managed through the CRM UI/API."""
+    cfg = _mysql_config()
+    with pymysql.connect(**cfg) as conn:
+        with conn.cursor() as cur:
+            _ensure_crawl_target_table(cur)
+            cur.execute(
+                "SELECT target_id, name, target_url, is_active, created_at, updated_at "
+                "FROM crawl_target ORDER BY target_id"
+            )
+            rows = cur.fetchall() or []
+        conn.commit()
+    return [_target_row(row) for row in rows]
+
+
+def list_crawl_targets_page(page: int = 1, per_page: int = 10) -> dict[str, Any]:
+    """Return a stable, bounded page of URL targets for the management UI."""
+    cfg = _mysql_config()
+    safe_per_page = max(1, min(int(per_page), 100))
+    requested_page = max(1, int(page))
+
+    with pymysql.connect(**cfg) as conn:
+        with conn.cursor() as cur:
+            _ensure_crawl_target_table(cur)
+            cur.execute("SELECT COUNT(*) AS total FROM crawl_target")
+            total = int((cur.fetchone() or {}).get("total", 0))
+            total_pages = max(1, (total + safe_per_page - 1) // safe_per_page)
+            safe_page = min(requested_page, total_pages)
+            offset = (safe_page - 1) * safe_per_page
+            cur.execute(
+                "SELECT target_id, name, target_url, is_active, created_at, updated_at "
+                "FROM crawl_target ORDER BY target_id DESC LIMIT %s OFFSET %s",
+                (safe_per_page, offset),
+            )
+            rows = cur.fetchall() or []
+        conn.commit()
+
+    return {
+        "items": [_target_row(row) for row in rows],
+        "total": total,
+        "page": safe_page,
+        "per_page": safe_per_page,
+        "total_pages": total_pages,
+    }
+
+
+def create_crawl_target(name: str, target_url: str, is_active: bool = True) -> dict[str, Any]:
+    cfg = _mysql_config()
+    with pymysql.connect(**cfg) as conn:
+        with conn.cursor() as cur:
+            _ensure_crawl_target_table(cur)
+            cur.execute(
+                "INSERT INTO crawl_target (name, target_url, is_active) VALUES (%s, %s, %s)",
+                (name, target_url, int(is_active)),
+            )
+            target_id = cur.lastrowid
+            cur.execute(
+                "SELECT target_id, name, target_url, is_active, created_at, updated_at "
+                "FROM crawl_target WHERE target_id = %s",
+                (target_id,),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    return _target_row(row)
+
+
+def update_crawl_target(target_id: int, name: str, target_url: str, is_active: bool) -> dict[str, Any] | None:
+    cfg = _mysql_config()
+    with pymysql.connect(**cfg) as conn:
+        with conn.cursor() as cur:
+            _ensure_crawl_target_table(cur)
+            cur.execute(
+                "UPDATE crawl_target SET name = %s, target_url = %s, is_active = %s WHERE target_id = %s",
+                (name, target_url, int(is_active), target_id),
+            )
+            if not cur.rowcount:
+                return None
+            cur.execute(
+                "SELECT target_id, name, target_url, is_active, created_at, updated_at "
+                "FROM crawl_target WHERE target_id = %s",
+                (target_id,),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    return _target_row(row)
+
+
+def delete_crawl_target(target_id: int) -> bool:
+    cfg = _mysql_config()
+    with pymysql.connect(**cfg) as conn:
+        with conn.cursor() as cur:
+            _ensure_crawl_target_table(cur)
+            cur.execute("DELETE FROM crawl_target WHERE target_id = %s", (target_id,))
+            deleted = bool(cur.rowcount)
+        conn.commit()
+    return deleted
+
+
 def _load_dotenv(env_path: Path) -> None:
     if not env_path.exists():
         return

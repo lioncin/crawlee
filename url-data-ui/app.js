@@ -6,11 +6,20 @@ const backendUrl = 'http://127.0.0.1:8765/results/mysql';
 const fetchBackendUrl = 'http://127.0.0.1:8765/fetch';
 const uploadBackendUrl = 'http://127.0.0.1:8765/upload/image';
 const recognizeBackendUrl = 'http://127.0.0.1:8765/issuer/recognize';
+const crawlTargetsBackendUrl = 'http://127.0.0.1:8765/crawl-targets';
 
 const startQueryBtn = document.getElementById('startQueryBtn');
 const queryBtn = document.getElementById('queryBtn');
 const statusText = document.getElementById('statusText');
 const resultTables = document.getElementById('resultTables');
+const sourceForm = document.getElementById('sourceForm');
+const sourceNameInput = document.getElementById('sourceName');
+const sourceUrlInput = document.getElementById('sourceUrl');
+const sourceActiveInput = document.getElementById('sourceActive');
+const sourceSaveBtn = document.getElementById('sourceSaveBtn');
+const sourceCancelBtn = document.getElementById('sourceCancelBtn');
+const sourceList = document.getElementById('sourceList');
+const sourceStatusText = document.getElementById('sourceStatusText');
 
 const toast = document.createElement('div');
 toast.className = 'copy-toast';
@@ -60,6 +69,135 @@ const modalState = {
 };
 
 let currentResultsData = null;
+let editingSourceId = null;
+let sourcePage = 1;
+const sourcePageSize = 10;
+
+function setSourceStatus(text, type = '') {
+    sourceStatusText.textContent = text;
+    sourceStatusText.className = `status ${type}`.trim();
+}
+
+function resetSourceForm() {
+    editingSourceId = null;
+    sourceForm.reset();
+    sourceActiveInput.checked = true;
+    sourceSaveBtn.textContent = '新增 URL';
+    sourceCancelBtn.hidden = true;
+}
+
+function renderCrawlTargets(data) {
+    const targets = Array.isArray(data?.items) ? data.items : [];
+    const page = Number(data?.page) || 1;
+    const total = Number(data?.total) || 0;
+    const totalPages = Number(data?.total_pages) || 1;
+    if (!Array.isArray(targets) || targets.length === 0) {
+        sourceList.innerHTML = '<p class="empty">尚未配置抓取 URL。新增后才会参与“查询”。</p>';
+        return;
+    }
+
+    const rows = targets
+        .map(
+            (target) => `
+                <tr>
+                  <td>${escapeHtml(target.name)}</td>
+                  <td><a href="${escapeHtml(target.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(target.url)}</a></td>
+                  <td><span class="target-status ${target.is_active ? 'active' : 'inactive'}">${target.is_active ? '启用' : '停用'}</span></td>
+                  <td class="source-actions">
+                    <button type="button" class="table-action edit-source" data-id="${target.id}">编辑</button>
+                    <button type="button" class="table-action delete-source danger" data-id="${target.id}">删除</button>
+                  </td>
+                </tr>`,
+        )
+        .join('');
+    sourceList.innerHTML = `
+      <div class="table-wrap source-table-wrap"><table><thead><tr><th>名称</th><th>URL</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="pagination" aria-label="URL 分页">
+        <span>共 ${total} 条，第 ${page} / ${totalPages} 页</span>
+        <div class="pagination-actions">
+          <button type="button" class="secondary-btn page-btn" data-page="${page - 1}" ${page <= 1 ? 'disabled' : ''}>上一页</button>
+          <button type="button" class="secondary-btn page-btn" data-page="${page + 1}" ${page >= totalPages ? 'disabled' : ''}>下一页</button>
+        </div>
+      </div>`;
+
+    sourceList.querySelectorAll('.edit-source').forEach((button) => {
+        button.addEventListener('click', () => {
+            const target = targets.find((item) => item.id === Number(button.dataset.id));
+            if (!target) return;
+            editingSourceId = target.id;
+            sourceNameInput.value = target.name;
+            sourceUrlInput.value = target.url;
+            sourceActiveInput.checked = Boolean(target.is_active);
+            sourceSaveBtn.textContent = '保存修改';
+            sourceCancelBtn.hidden = false;
+            sourceNameInput.focus();
+        });
+    });
+
+    sourceList.querySelectorAll('.delete-source').forEach((button) => {
+        button.addEventListener('click', async () => {
+            const target = targets.find((item) => item.id === Number(button.dataset.id));
+            if (!target || !window.confirm(`确定删除“${target.name}”吗？`)) return;
+            setSourceStatus('删除中...');
+            try {
+                const response = await fetch(`${crawlTargetsBackendUrl}/${target.id}`, { method: 'DELETE' });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.detail || `删除失败（${response.status}）`);
+                if (editingSourceId === target.id) resetSourceForm();
+                setSourceStatus('已删除', 'ok');
+                await loadCrawlTargets();
+            } catch (error) {
+                setSourceStatus(error.message || '删除失败', 'err');
+            }
+        });
+    });
+
+    sourceList.querySelectorAll('.page-btn').forEach((button) => {
+        button.addEventListener('click', () => loadCrawlTargets(Number(button.dataset.page)));
+    });
+}
+
+async function loadCrawlTargets(page = sourcePage) {
+    try {
+        const response = await fetch(`${crawlTargetsBackendUrl}?page=${page}&per_page=${sourcePageSize}`);
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || `加载失败（${response.status}）`);
+        renderCrawlTargets(data);
+        sourcePage = data.page || 1;
+        setSourceStatus(`已配置 ${data.total || 0} 个 URL`, 'ok');
+    } catch (error) {
+        sourceList.innerHTML = `<p class="empty">数据源加载失败：${escapeHtml(error.message || '未知错误')}</p>`;
+        setSourceStatus('加载失败', 'err');
+    }
+}
+
+async function saveCrawlTarget(event) {
+    event.preventDefault();
+    const payload = {
+        name: sourceNameInput.value.trim(),
+        url: sourceUrlInput.value.trim(),
+        is_active: sourceActiveInput.checked,
+    };
+    if (!payload.name || !payload.url) return;
+
+    const isEditing = editingSourceId !== null;
+    setSourceStatus(isEditing ? '保存中...' : '新增中...');
+    try {
+        const response = await fetch(isEditing ? `${crawlTargetsBackendUrl}/${editingSourceId}` : crawlTargetsBackendUrl, {
+            method: isEditing ? 'PUT' : 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || `保存失败（${response.status}）`);
+        resetSourceForm();
+        if (!isEditing) sourcePage = 1;
+        setSourceStatus(isEditing ? '已保存修改' : '已新增 URL', 'ok');
+        await loadCrawlTargets();
+    } catch (error) {
+        setSourceStatus(error.message || '保存失败', 'err');
+    }
+}
 
 const imageModal = document.createElement('div');
 imageModal.className = 'image-modal';
@@ -639,5 +777,8 @@ pasteZone.addEventListener('paste', (event) => {
 
 startQueryBtn.addEventListener('click', startQuery);
 queryBtn.addEventListener('click', runQuery);
+sourceForm.addEventListener('submit', saveCrawlTarget);
+sourceCancelBtn.addEventListener('click', resetSourceForm);
 renderImagePreview();
+loadCrawlTargets();
 runQuery();

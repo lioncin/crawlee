@@ -12,17 +12,30 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
 import oss2
+import pymysql
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from llm_client import LLMClientError, chat_completion, extract_notice_fields_from_titles, recognize_company_from_images
-from mysql_store import load_ai_analysis_candidates, load_latest_ai_analysis_results, load_latest_results_from_mysql, replace_ai_analysis_results, save_issuer_recognition_result, store_fetch_result
+from mysql_store import (
+    create_crawl_target,
+    delete_crawl_target,
+    list_crawl_targets,
+    list_crawl_targets_page,
+    load_ai_analysis_candidates,
+    load_latest_ai_analysis_results,
+    load_latest_results_from_mysql,
+    replace_ai_analysis_results,
+    save_issuer_recognition_result,
+    store_fetch_result,
+    update_crawl_target,
+)
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
-app = FastAPI(title="Crawlee URL Result API", version="0.5.0")
+app = FastAPI(title="同泽CRM 数据抓取 API", version="0.5.0")
 logger = logging.getLogger(__name__)
 
 app.add_middleware(
@@ -39,52 +52,6 @@ DAILY_FETCH_TIME = time(hour=4, minute=30)
 _daily_fetch_task: asyncio.Task[None] | None = None
 
 
-def build_sse_ipo_query_url(page_no: int, curr_status: str, callback: str, timestamp: str) -> str:
-    return (
-        "https://query.sse.com.cn/commonSoaQuery.do"
-        f"?jsonCallBack={callback}"
-        "&sqlId=SH_XM_LB"
-        "&keyword="
-        "&issueMarketType=1,2"
-        f"&currStatus={curr_status}"
-        "&province="
-        "&csrcCode="
-        "&auditApplyDateBegin="
-        "&auditApplyDateEnd="
-        "&order=updateDate|desc,stockAuditNum|desc"
-        "&isPagination=true"
-        "&pageHelp.cacheSize=1"
-        f"&pageHelp.beginPage={page_no}"
-        f"&pageHelp.endPage={page_no}"
-        f"&pageHelp.pageSize={SSE_IPO_PAGE_SIZE}"
-        f"&pageHelp.pageNo={page_no}"
-        f"&_={timestamp}"
-    )
-
-
-SSE_IPO_QUERY_URLS = [
-    build_sse_ipo_query_url(2, "1", "jsonpCallback93695872", "1784079371530"),
-    build_sse_ipo_query_url(1, "1", "jsonpCallback65633906", "1784079371531"),
-    build_sse_ipo_query_url(3, "2", "jsonpCallback30911885", "1784079371534"),
-    build_sse_ipo_query_url(2, "2", "jsonpCallback65582598", "1784079371535"),
-    build_sse_ipo_query_url(1, "2", "jsonpCallback23548945", "1784079371536"),
-]
-SSE_IPO_QUERY_URL = SSE_IPO_QUERY_URLS[0]
-
-PEDAILY_FINANCING_URLS = [
-    "https://www.pedaily.cn/first/t76/",
-    *[f"https://www.pedaily.cn/first/t76/{page_no}/" for page_no in range(2, 6)],
-]
-
-# Fixed target URLs. `url: "*"` will fetch all of them.
-FIXED_URLS = [
-    # "https://www.szse.cn/disclosure/notice/company/index.html",
-    *SSE_IPO_QUERY_URLS,
-    *PEDAILY_FINANCING_URLS,
-    # "https://www2.hkexnews.hk/New-Listings/New-Listing-Information/Main-Board?sc_lang=zh-HK",
-    # "https://www.cninfo.com.cn/new/index",
-]
-
 OSS_ENDPOINT = os.getenv("OSS_ENDPOINT", "https://oss-cn-hangzhou.aliyuncs.com")
 OSS_BUCKET_NAME = os.getenv("OSS_BUCKET_NAME", "")
 OSS_ACCESS_KEY_ID = os.getenv("OSS_ACCESS_KEY_ID", "")
@@ -96,6 +63,12 @@ class FetchRequest(BaseModel):
     url: str
     timeout_seconds: float = 20.0
     include_html: bool = False
+
+
+class CrawlTargetRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    url: str = Field(min_length=1, max_length=2048)
+    is_active: bool = True
 
 
 class LLMChatRequest(BaseModel):
@@ -713,10 +686,15 @@ async def fetch_one_url(
 
 
 async def fetch_fixed_urls(timeout_seconds: float, include_html: bool = False) -> dict[str, FetchResponse]:
+    targets = await asyncio.to_thread(list_crawl_targets)
+    target_urls = [target["url"] for target in targets if target["is_active"]]
+    if not target_urls:
+        raise ValueError("No active crawl targets configured")
+
     timeout = httpx.Timeout(timeout_seconds)
     async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
         results: dict[str, FetchResponse] = {}
-        for target in FIXED_URLS:
+        for target in target_urls:
             results[target] = await fetch_one_url(client, target, include_html)
 
     await asyncio.to_thread(
@@ -776,6 +754,62 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/crawl-targets")
+async def get_crawl_targets(
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=10, ge=1, le=100),
+) -> dict[str, object]:
+    try:
+        return await asyncio.to_thread(list_crawl_targets_page, page, per_page)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load crawl targets: {exc}") from exc
+
+
+@app.post("/crawl-targets", status_code=201)
+async def add_crawl_target(payload: CrawlTargetRequest) -> dict[str, object]:
+    name = payload.name.strip()
+    url = payload.url.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="name must not be empty")
+    if not is_valid_http_url(url):
+        raise HTTPException(status_code=422, detail="url must be a valid http/https URL")
+    try:
+        return await asyncio.to_thread(create_crawl_target, name, url, payload.is_active)
+    except pymysql.err.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="This URL already exists") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to create crawl target: {exc}") from exc
+
+
+@app.put("/crawl-targets/{target_id}")
+async def edit_crawl_target(target_id: int, payload: CrawlTargetRequest) -> dict[str, object]:
+    name = payload.name.strip()
+    url = payload.url.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="name must not be empty")
+    if not is_valid_http_url(url):
+        raise HTTPException(status_code=422, detail="url must be a valid http/https URL")
+    try:
+        target = await asyncio.to_thread(update_crawl_target, target_id, name, url, payload.is_active)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Crawl target not found")
+        return target
+    except pymysql.err.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="This URL already exists") from exc
+
+
+@app.delete("/crawl-targets/{target_id}")
+async def remove_crawl_target(target_id: int) -> dict[str, bool]:
+    try:
+        if not await asyncio.to_thread(delete_crawl_target, target_id):
+            raise HTTPException(status_code=404, detail="Crawl target not found")
+        return {"deleted": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to delete crawl target: {exc}") from exc
+
+
 @app.post("/fetch", response_model=FetchResponse | dict[str, FetchResponse])
 async def fetch_url(payload: FetchRequest) -> FetchResponse | dict[str, FetchResponse]:
     url = payload.url.strip()
@@ -803,6 +837,10 @@ async def fetch_url(payload: FetchRequest) -> FetchResponse | dict[str, FetchRes
         raise HTTPException(status_code=504, detail="Upstream request timed out") from exc
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Upstream request failed: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to persist result to MySQL: {exc}") from exc
 
