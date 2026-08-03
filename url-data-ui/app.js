@@ -7,6 +7,7 @@ const fetchBackendUrl = 'http://127.0.0.1:8765/fetch';
 const uploadBackendUrl = 'http://127.0.0.1:8765/upload/image';
 const recognizeBackendUrl = 'http://127.0.0.1:8765/issuer/recognize';
 const crawlTargetsBackendUrl = 'http://127.0.0.1:8765/crawl-targets';
+const fetchProgressBackendUrl = 'http://127.0.0.1:8765/fetch-progress';
 
 const startQueryBtn = document.getElementById('startQueryBtn');
 const queryBtn = document.getElementById('queryBtn');
@@ -20,6 +21,7 @@ const sourceSaveBtn = document.getElementById('sourceSaveBtn');
 const sourceCancelBtn = document.getElementById('sourceCancelBtn');
 const sourceList = document.getElementById('sourceList');
 const sourceStatusText = document.getElementById('sourceStatusText');
+const fetchProgressText = document.getElementById('fetchProgressText');
 
 const toast = document.createElement('div');
 toast.className = 'copy-toast';
@@ -72,10 +74,45 @@ let currentResultsData = null;
 let editingSourceId = null;
 let sourcePage = 1;
 const sourcePageSize = 10;
+let fetchProgressTimer = null;
+let resultsPage = 1;
+const resultsPageSize = 10;
 
 function setSourceStatus(text, type = '') {
     sourceStatusText.textContent = text;
     sourceStatusText.className = `status ${type}`.trim();
+}
+
+function setFetchProgress(text, type = '') {
+    fetchProgressText.textContent = text;
+    fetchProgressText.className = `fetch-progress ${type}`.trim();
+}
+
+async function refreshFetchProgress() {
+    try {
+        const response = await fetch(fetchProgressBackendUrl);
+        const progress = await response.json().catch(() => ({}));
+        if (!response.ok) return;
+
+        const completed = Number(progress.completed) || 0;
+        const total = Number(progress.total) || 0;
+        const prefix = total ? `（${completed}/${total}）` : '';
+        setFetchProgress(`${prefix}${progress.message || '正在抓取中'}`, progress.status === 'failed' ? 'err' : progress.status === 'completed' ? 'ok' : '');
+    } catch {
+        // The fetch request itself still reports the final error; avoid replacing it with a polling error.
+    }
+}
+
+function startFetchProgressPolling() {
+    stopFetchProgressPolling();
+    fetchProgressTimer = window.setInterval(refreshFetchProgress, 500);
+}
+
+function stopFetchProgressPolling() {
+    if (fetchProgressTimer !== null) {
+        window.clearInterval(fetchProgressTimer);
+        fetchProgressTimer = null;
+    }
 }
 
 function resetSourceForm() {
@@ -297,6 +334,10 @@ function buildIssuerCell(cellValue, sourceUrl, noticeUrl) {
     const sourceAttr = encodeAttr(sourceUrl);
     const noticeAttr = encodeAttr(noticeUrl);
     return `<td><span class="issuer-cell"><span>${safeText}</span><button type="button" class="copy-issuer" data-copy="${copyAttr}" data-issuer="${copyAttr}" data-source-url="${sourceAttr}" data-notice-url="${noticeAttr}">[复制]</button></span></td>`;
+}
+
+function getItemTime(item) {
+    return item?.date || item?.update_date || item?.publish_time || item?.accept_date || '-';
 }
 
 function renderItemsTable(items, sourceUrl) {
@@ -607,7 +648,7 @@ async function uploadImages() {
     }
 }
 
-function renderResults(data) {
+function renderResults(data, pagination = {}) {
     resultTables.innerHTML = '';
     currentResultsData = data;
 
@@ -625,6 +666,7 @@ function renderResults(data) {
     const tableHeader = `
       <thead>
         <tr>
+          <th>时间</th>
           <th>issuer_full_name</th>
           <th>edit_status</th>
         </tr>
@@ -649,6 +691,7 @@ function renderResults(data) {
                     const editStatus = normalizeEditStatus(item?.edit_status);
                     return `
             <tr>
+              <td>${escapeHtml(getItemTime(item))}</td>
               ${buildIssuerCell(issuerName, sourceUrl, noticeUrl)}
               <td>${buildStatusBadge(editStatus)}</td>
             </tr>
@@ -663,6 +706,9 @@ function renderResults(data) {
         return;
     }
 
+    const page = Number(pagination.page) || 1;
+    const total = Number(pagination.total) || 0;
+    const totalPages = Number(pagination.total_pages) || 1;
     const fragments = `
       <div class="table-wrap">
         <table>
@@ -670,18 +716,29 @@ function renderResults(data) {
           <tbody>${tableBody}</tbody>
         </table>
       </div>
+      <div class="pagination" aria-label="查询结果分页">
+        <span>共 ${total} 条抓取记录，第 ${page} / ${totalPages} 页</span>
+        <div class="pagination-actions">
+          <button type="button" class="secondary-btn page-btn result-page-btn" data-page="${page - 1}" ${page <= 1 ? 'disabled' : ''}>上一页</button>
+          <button type="button" class="secondary-btn page-btn result-page-btn" data-page="${page + 1}" ${page >= totalPages ? 'disabled' : ''}>下一页</button>
+        </div>
+      </div>
     `;
 
     resultTables.innerHTML = fragments;
     bindCopyEvents();
+    resultTables.querySelectorAll('.result-page-btn').forEach((button) => {
+        button.addEventListener('click', () => runQuery(Number(button.dataset.page)));
+    });
 }
 
-async function runQuery() {
+async function runQuery(page = resultsPage) {
     setStatus('查询中...');
-    resultTables.innerHTML = '<p class="empty">正在从数据库加载已保存结果...</p>';
+    resultTables.classList.add('is-loading');
+    resultTables.setAttribute('aria-busy', 'true');
 
     try {
-        const response = await fetch(backendUrl);
+        const response = await fetch(`${backendUrl}?page=${page}&per_page=${resultsPageSize}`);
 
         const text = await response.text();
         let parsed;
@@ -692,16 +749,24 @@ async function runQuery() {
             throw new Error('后端返回的不是有效 JSON');
         }
 
-        renderResults(parsed);
+        resultsPage = parsed?.pagination?.page || 1;
+        renderResults(parsed?.results || {}, parsed?.pagination || {});
         setStatus(response.ok ? `成功 ${response.status}` : `失败 ${response.status}`, response.ok ? 'ok' : 'err');
     } catch (error) {
         resultTables.innerHTML = `<p class="empty">请求失败：${escapeHtml(error.message)}</p>`;
         setStatus('请求异常', 'err');
+    } finally {
+        resultTables.classList.remove('is-loading');
+        resultTables.removeAttribute('aria-busy');
     }
 }
 
 async function startQuery() {
+    if (startQueryBtn.disabled) return;
+    startQueryBtn.disabled = true;
     setStatus('查询中...');
+    setFetchProgress('正在准备抓取...');
+    startFetchProgressPolling();
     resultTables.innerHTML = '<p class="empty">正在请求后端开始抓取...</p>';
 
     try {
@@ -728,11 +793,16 @@ async function startQuery() {
             throw new Error(parsed?.detail || `开始查询失败（${response.status}）`);
         }
 
-        renderResults(parsed);
+        resultsPage = 1;
+        renderResults(parsed, { total: Object.keys(parsed || {}).length, page: 1, total_pages: 1 });
         setStatus(`查询成功 ${response.status}`, 'ok');
     } catch (error) {
         resultTables.innerHTML = `<p class="empty">请求失败：${escapeHtml(error.message)}</p>`;
         setStatus('查询失败', 'err');
+    } finally {
+        stopFetchProgressPolling();
+        await refreshFetchProgress();
+        startQueryBtn.disabled = false;
     }
 }
 

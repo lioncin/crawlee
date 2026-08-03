@@ -50,6 +50,35 @@ SSE_IPO_PAGE_SIZE = 25
 LLM_ISSUER_BATCH_SIZE = 25
 DAILY_FETCH_TIME = time(hour=4, minute=30)
 _daily_fetch_task: asyncio.Task[None] | None = None
+_fixed_fetch_lock = asyncio.Lock()
+_fetch_progress: dict[str, object] = {
+    "status": "idle",
+    "current_url": None,
+    "completed": 0,
+    "total": 0,
+    "message": "等待开始抓取",
+    "updated_at": None,
+}
+
+
+def set_fetch_progress(
+    status: str,
+    *,
+    current_url: str | None = None,
+    completed: int = 0,
+    total: int = 0,
+    message: str,
+) -> None:
+    _fetch_progress.update(
+        {
+            "status": status,
+            "current_url": current_url,
+            "completed": completed,
+            "total": total,
+            "message": message,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    )
 
 
 OSS_ENDPOINT = os.getenv("OSS_ENDPOINT", "https://oss-cn-hangzhou.aliyuncs.com")
@@ -686,23 +715,53 @@ async def fetch_one_url(
 
 
 async def fetch_fixed_urls(timeout_seconds: float, include_html: bool = False) -> dict[str, FetchResponse]:
-    targets = await asyncio.to_thread(list_crawl_targets)
-    target_urls = [target["url"] for target in targets if target["is_active"]]
-    if not target_urls:
-        raise ValueError("No active crawl targets configured")
+    if _fixed_fetch_lock.locked():
+        raise ValueError("A fixed URL fetch is already running")
 
-    timeout = httpx.Timeout(timeout_seconds)
-    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+    async with _fixed_fetch_lock:
+        set_fetch_progress("running", message="正在准备抓取 URL")
+        targets = await asyncio.to_thread(list_crawl_targets)
+        target_urls = [target["url"] for target in targets if target["is_active"]]
+        if not target_urls:
+            set_fetch_progress("failed", message="没有可抓取的已启用 URL")
+            raise ValueError("No active crawl targets configured")
+
+        total = len(target_urls)
         results: dict[str, FetchResponse] = {}
-        for target in target_urls:
-            results[target] = await fetch_one_url(client, target, include_html)
+        try:
+            timeout = httpx.Timeout(timeout_seconds)
+            async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+                for index, target in enumerate(target_urls):
+                    set_fetch_progress(
+                        "running",
+                        current_url=target,
+                        completed=index,
+                        total=total,
+                        message=f"{target} 正在抓取中",
+                    )
+                    results[target] = await fetch_one_url(client, target, include_html)
 
-    await asyncio.to_thread(
-        store_fetch_result,
-        "*",
-        {k: v.model_dump(mode="json") for k, v in results.items()},
-    )
-    return results
+            await asyncio.to_thread(
+                store_fetch_result,
+                "*",
+                {k: v.model_dump(mode="json") for k, v in results.items()},
+            )
+            set_fetch_progress(
+                "completed",
+                completed=total,
+                total=total,
+                message=f"抓取完成，共处理 {total} 个 URL",
+            )
+            return results
+        except Exception as exc:
+            set_fetch_progress(
+                "failed",
+                current_url=str(_fetch_progress.get("current_url") or "") or None,
+                completed=len(results),
+                total=total,
+                message=f"抓取失败：{exc}",
+            )
+            raise
 
 
 def seconds_until_daily_fetch(now: datetime | None = None) -> float:
@@ -752,6 +811,11 @@ async def stop_daily_fixed_fetch_task() -> None:
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/fetch-progress")
+async def get_fetch_progress() -> dict[str, object]:
+    return dict(_fetch_progress)
 
 
 @app.get("/crawl-targets")
@@ -969,9 +1033,13 @@ async def llm_chat(payload: LLMChatRequest) -> LLMChatResponse:
 
 
 @app.get("/results/mysql")
-async def get_results_from_mysql(source_url: str | None = None, limit: int = 20) -> dict[str, dict]:
+async def get_results_from_mysql(
+    source_url: str | None = None,
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=10, ge=1, le=100),
+) -> dict[str, object]:
     try:
-        data = await asyncio.to_thread(load_latest_results_from_mysql, source_url, limit)
+        data = await asyncio.to_thread(load_latest_results_from_mysql, source_url, page, per_page)
         return data
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to query results from MySQL: {exc}") from exc

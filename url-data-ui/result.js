@@ -298,7 +298,7 @@ function bindCopyEvents() {
     });
 }
 
-function renderResults(data) {
+function renderResults(data, pagination = {}) {
     if (!resultTables) {
         return;
     }
@@ -331,8 +331,21 @@ function renderResults(data) {
     `;
     });
 
-    resultTables.innerHTML = fragments.join('');
+    const page = Number(pagination.page) || 1;
+    const total = Number(pagination.total) || 0;
+    const totalPages = Number(pagination.total_pages) || 1;
+    resultTables.innerHTML = `${fragments.join('')}
+      <div class="pagination" aria-label="查询结果分页">
+        <span>共 ${total} 条抓取记录，第 ${page} / ${totalPages} 页</span>
+        <div class="pagination-actions">
+          <button type="button" class="secondary-btn page-btn result-page-btn" data-page="${page - 1}" ${page <= 1 ? 'disabled' : ''}>上一页</button>
+          <button type="button" class="secondary-btn page-btn result-page-btn" data-page="${page + 1}" ${page >= totalPages ? 'disabled' : ''}>下一页</button>
+        </div>
+      </div>`;
     bindCopyEvents();
+    resultTables.querySelectorAll('.result-page-btn').forEach((button) => {
+        button.addEventListener('click', () => loadResults(Number(button.dataset.page)));
+    });
 }
 
 function flattenAiGroups(data) {
@@ -715,16 +728,21 @@ function bindAiFilterEvents() {
     }
 }
 
-async function loadResults() {
+let resultsPage = 1;
+const resultsPageSize = 10;
+
+async function loadResults(page = resultsPage) {
     if (!resultTables) {
         return;
     }
 
     setStatus('');
-    resultTables.innerHTML = '<p class="empty">正在从 MySQL 读取数据...</p>';
+    resultTables.classList.add('is-loading');
+    resultTables.setAttribute('aria-busy', 'true');
 
     const params = new URLSearchParams();
-    params.set('limit', '20');
+    params.set('page', String(page));
+    params.set('per_page', String(resultsPageSize));
 
     const url = `${backendUrl}?${params.toString()}`;
 
@@ -739,11 +757,15 @@ async function loadResults() {
             throw new Error('后端返回的不是有效 JSON');
         }
 
-        renderResults(parsed);
+        resultsPage = parsed?.pagination?.page || 1;
+        renderResults(parsed?.results || {}, parsed?.pagination || {});
         setStatus(response.ok ? '' : `失败 ${response.status}`, response.ok ? '' : 'err');
     } catch (error) {
         resultTables.innerHTML = `<p class="empty">读取失败：${escapeHtml(error.message)}</p>`;
         setStatus('请求异常', 'err');
+    } finally {
+        resultTables.classList.remove('is-loading');
+        resultTables.removeAttribute('aria-busy');
     }
 }
 

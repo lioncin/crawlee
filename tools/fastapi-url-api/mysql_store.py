@@ -220,6 +220,16 @@ def _loads_json(value: Any) -> Any:
     return None
 
 
+def _item_time_sort_key(item: dict[str, Any]) -> int:
+    """Return a sortable timestamp-like key from the source item's date fields."""
+    for field in ("date", "update_date", "publish_time", "accept_date"):
+        value = str(item.get(field) or "").strip()
+        digits = "".join(char for char in value if char.isdigit())
+        if len(digits) >= 8:
+            return int(digits[:14].ljust(14, "0"))
+    return 0
+
+
 def _pick_first(data: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         val = data.get(key)
@@ -1065,9 +1075,19 @@ def _hydrate_page_items_from_entity(cur, source_url: str, page_payload: dict[str
                 item["company_info"] = ai_company_info
 
 
-def load_latest_results_from_mysql(source_url: str | None = None, limit: int = 20) -> dict[str, Any]:
+def load_latest_results_from_mysql(
+    source_url: str | None = None,
+    page: int = 1,
+    per_page: int = 10,
+) -> dict[str, Any]:
+    """Load the newest payload per source and paginate its individual items.
+
+    A crawl payload can hold many notices, so paginating sources alone would
+    still return all notices from each selected source.
+    """
     cfg = _mysql_config()
-    safe_limit = max(1, min(int(limit), 100))
+    safe_per_page = max(1, min(int(per_page), 100))
+    requested_page = max(1, int(page))
 
     with pymysql.connect(**cfg) as conn:
         with conn.cursor() as cur:
@@ -1083,67 +1103,74 @@ def load_latest_results_from_mysql(source_url: str | None = None, limit: int = 2
                     """,
                     (source_url,),
                 )
-                row = cur.fetchone()
-                if not row:
-                    return {}
-                payload = _loads_json(row.get("raw_payload")) or {}
+                rows = cur.fetchall() or []
+            else:
+                cur.execute(
+                    """
+                    SELECT x.source_url, x.raw_payload
+                    FROM (
+                      SELECT
+                        sc.source_url,
+                        cr.raw_payload,
+                        cr.task_time,
+                        cr.record_id,
+                        ROW_NUMBER() OVER (
+                          PARTITION BY cr.source_id
+                          ORDER BY cr.task_time DESC, cr.record_id DESC
+                        ) AS rn
+                      FROM crawl_record cr
+                      JOIN source_config sc ON sc.source_id = cr.source_id
+                    ) x
+                    WHERE x.rn = 1
+                    ORDER BY x.task_time DESC, x.record_id DESC
+                    """
+                )
+                rows = cur.fetchall() or []
+
+            latest_payloads: list[tuple[str, dict[str, Any]]] = []
+            for row in rows:
+                payload = _loads_json(row.get("raw_payload"))
+                if not isinstance(payload, dict):
+                    continue
                 src = str(row.get("source_url"))
-                if isinstance(payload, dict):
-                    _hydrate_page_items_from_entity(cur, src, payload)
-                    items = payload.get("items") if isinstance(payload.get("items"), list) else []
-                else:
-                    items = []
+                _hydrate_page_items_from_entity(cur, src, payload)
+                latest_payloads.append((src, payload))
 
-                return {
-                    src: {
-                        **(payload if isinstance(payload, dict) else {}),
-                        "rows": items,
-                    }
-                }
+            flattened: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+            for src, payload in latest_payloads:
+                items = payload.get("items")
+                if not isinstance(items, list):
+                    continue
+                for item in items:
+                    if isinstance(item, dict):
+                        flattened.append((src, payload, item))
 
-            cur.execute(
-                """
-                SELECT x.source_url, x.raw_payload
-                FROM (
-                  SELECT
-                    sc.source_url,
-                    cr.raw_payload,
-                    cr.task_time,
-                    cr.record_id,
-                    ROW_NUMBER() OVER (
-                      PARTITION BY cr.source_id
-                      ORDER BY cr.task_time DESC, cr.record_id DESC
-                    ) AS rn
-                  FROM crawl_record cr
-                  JOIN source_config sc ON sc.source_id = cr.source_id
-                ) x
-                WHERE x.rn = 1
-                ORDER BY x.task_time DESC, x.record_id DESC
-                LIMIT %s
-                """,
-                (safe_limit,),
-            )
-            rows = cur.fetchall() or []
+            # Sort newest notices first before slicing, so every page preserves
+            # the same global chronological order.
+            flattened.sort(key=lambda entry: _item_time_sort_key(entry[2]), reverse=True)
+            total = len(flattened)
+            total_pages = max(1, (total + safe_per_page - 1) // safe_per_page)
+            safe_page = min(requested_page, total_pages)
+            offset = (safe_page - 1) * safe_per_page
+            paged_items = flattened[offset : offset + safe_per_page]
 
             result: dict[str, Any] = {}
-            for row in rows:
-                src = str(row.get("source_url"))
-                payload = _loads_json(row.get("raw_payload"))
-                if payload is None:
-                    continue
-                if isinstance(payload, dict):
-                    _hydrate_page_items_from_entity(cur, src, payload)
-                    items = payload.get("items") if isinstance(payload.get("items"), list) else []
-                    result[src] = {
-                        **payload,
-                        "rows": items,
-                    }
-                else:
-                    result[src] = {
-                        "rows": [],
-                    }
+            for src, payload, item in paged_items:
+                if src not in result:
+                    page_payload = {**payload, "items": [], "rows": []}
+                    result[src] = page_payload
+                result[src]["items"].append(item)
+                result[src]["rows"].append(item)
 
-            return result
+            return {
+                "results": result,
+                "pagination": {
+                    "total": total,
+                    "page": safe_page,
+                    "per_page": safe_per_page,
+                    "total_pages": total_pages,
+                },
+            }
 
 
 def save_issuer_recognition_result(

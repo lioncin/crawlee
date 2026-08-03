@@ -242,6 +242,27 @@ button:hover {
   transform: translateY(1px);
 }
 
+#startQueryBtn:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.fetch-progress {
+  min-height: 1.4em;
+  margin: -6px 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.fetch-progress.ok {
+  color: var(--ok);
+}
+
+.fetch-progress.err {
+  color: var(--err);
+}
+
 .hint {
   margin: 10px 0 0;
   color: var(--muted);
@@ -289,6 +310,12 @@ td {
   margin-top: 12px;
   display: grid;
   gap: 14px;
+}
+
+.result-tables.is-loading {
+  opacity: 0.62;
+  pointer-events: none;
+  transition: opacity 120ms ease;
 }
 
 .result-card {
