@@ -27,6 +27,7 @@ from mysql_store import (
     load_ai_analysis_candidates,
     load_latest_ai_analysis_results,
     load_latest_results_from_mysql,
+    mark_ai_analysis_results_synced,
     replace_ai_analysis_results,
     save_issuer_recognition_result,
     store_fetch_result,
@@ -98,6 +99,10 @@ class CrawlTargetRequest(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     url: str = Field(min_length=1, max_length=2048)
     is_active: bool = True
+
+
+class AiAnalysisSyncRequest(BaseModel):
+    analysis_ids: list[int] = Field(min_length=1, max_length=5000)
 
 
 class LLMChatRequest(BaseModel):
@@ -1344,11 +1349,23 @@ def _build_lead_analysis_prompt(rows: list[dict[str, object]]) -> str:
 
 
 @app.get("/analysis/lead-score")
-async def get_analysis_lead_score() -> dict[str, object]:
+async def get_analysis_lead_score(
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=10, ge=1, le=100),
+) -> dict[str, object]:
     try:
-        return await asyncio.to_thread(load_latest_ai_analysis_results)
+        return await asyncio.to_thread(load_latest_ai_analysis_results, page, per_page)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to query AI analysis results from MySQL: {exc}") from exc
+
+
+@app.post("/analysis/lead-score/sync-status")
+async def mark_analysis_lead_score_synced(payload: AiAnalysisSyncRequest) -> dict[str, int]:
+    try:
+        updated = await asyncio.to_thread(mark_ai_analysis_results_synced, payload.analysis_ids)
+        return {"updated": updated}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to update CRM sync status: {exc}") from exc
 
 
 @app.post("/analysis/lead-score")

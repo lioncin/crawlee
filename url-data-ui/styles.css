@@ -194,6 +194,25 @@ button:hover {
   background: rgba(75, 97, 89, 0.08);
 }
 
+.sync-status {
+  display: inline-flex;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.sync-status.synced {
+  color: var(--ok);
+  background: rgba(22, 101, 52, 0.1);
+}
+
+.sync-status.unsynced {
+  color: var(--accent-2);
+  background: rgba(194, 65, 12, 0.1);
+}
+
 .pagination {
   display: flex;
   align-items: center;

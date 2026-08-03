@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 EDIT_STATUS_UNEDITED = "未编辑"
 EDIT_STATUS_EDITED = "已编辑"
+AI_SYNC_STATUS_UNSYNCED = "未同步"
+AI_SYNC_STATUS_SYNCED = "已同步"
 
 
 def _ensure_crawl_target_table(cur) -> None:
@@ -32,6 +34,25 @@ def _ensure_crawl_target_table(cur) -> None:
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """
     )
+
+
+def _ensure_ai_analysis_sync_columns(cur) -> None:
+    """Add CRM sync fields for existing AI analysis tables on upgrade."""
+    cur.execute(
+        """
+        SELECT COLUMN_NAME
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ai_analysis_result'
+        """
+    )
+    columns = {str(row.get("COLUMN_NAME")) for row in (cur.fetchall() or [])}
+    if "sync_status" not in columns:
+        cur.execute(
+            "ALTER TABLE ai_analysis_result "
+            "ADD COLUMN sync_status VARCHAR(16) NOT NULL DEFAULT '未同步' AFTER sort_order"
+        )
+    if "synced_at" not in columns:
+        cur.execute("ALTER TABLE ai_analysis_result ADD COLUMN synced_at DATETIME NULL AFTER sync_status")
 
 
 def _target_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -1448,6 +1469,7 @@ def replace_ai_analysis_results(summary: dict[str, Any], rows: list[dict[str, An
 
     with pymysql.connect(**cfg) as conn:
         with conn.cursor() as cur:
+            _ensure_ai_analysis_sync_columns(cur)
             # User requested replace semantics: clear old AI analysis then insert new.
             cur.execute("DELETE FROM ai_analysis_result")
             cur.execute("DELETE FROM ai_analysis_run")
@@ -1502,11 +1524,14 @@ def replace_ai_analysis_results(summary: dict[str, Any], rows: list[dict[str, An
     }
 
 
-def load_latest_ai_analysis_results() -> dict[str, Any]:
+def load_latest_ai_analysis_results(page: int = 1, per_page: int = 10) -> dict[str, Any]:
     cfg = _mysql_config()
+    safe_per_page = max(1, min(int(per_page), 100))
+    requested_page = max(1, int(page))
 
     with pymysql.connect(**cfg) as conn:
         with conn.cursor() as cur:
+            _ensure_ai_analysis_sync_columns(cur)
             cur.execute(
                 """
                 SELECT run_id, total_count, chunk_size, chunk_count, generated_at, summary_payload
@@ -1526,19 +1551,36 @@ def load_latest_ai_analysis_results() -> dict[str, Any]:
                         "generated_at": "",
                     },
                     "groups": {"A": [], "B": [], "C": [], "D": []},
+                    "pagination": {"total": 0, "page": 1, "per_page": safe_per_page, "total_pages": 1},
                 }
 
             run_id = int(run_row.get("run_id") or 0)
             summary_payload = _loads_json(run_row.get("summary_payload"))
 
+            cur.execute("SELECT COUNT(*) AS total FROM ai_analysis_result WHERE run_id = %s", (run_id,))
+            total = int((cur.fetchone() or {}).get("total", 0))
+            total_pages = max(1, (total + safe_per_page - 1) // safe_per_page)
+            safe_page = min(requested_page, total_pages)
+            offset = (safe_page - 1) * safe_per_page
+
+            cur.execute(
+                "SELECT grade, COUNT(*) AS total FROM ai_analysis_result WHERE run_id = %s GROUP BY grade",
+                (run_id,),
+            )
+            count_rows = cur.fetchall() or []
+            counts = {grade: 0 for grade in ("A", "B", "C", "D")}
+            for count_row in count_rows:
+                counts[_normalize_lead_grade(count_row.get("grade"))] = int(count_row.get("total") or 0)
+
             cur.execute(
                 """
-                SELECT id, grade, company_name, contact_name, phone, email, employee_count, operating_revenue, insured_count, certificate_names, certificate_industries, reason, title, item_date
+                SELECT id, grade, company_name, contact_name, phone, email, employee_count, operating_revenue, insured_count, certificate_names, certificate_industries, reason, title, item_date, sync_status, synced_at
                 FROM ai_analysis_result
                 WHERE run_id = %s
                 ORDER BY sort_order ASC, id ASC
+                LIMIT %s OFFSET %s
                 """,
-                (run_id,),
+                (run_id, safe_per_page, offset),
             )
             rows = cur.fetchall() or []
 
@@ -1548,6 +1590,7 @@ def load_latest_ai_analysis_results() -> dict[str, Any]:
         item_date = row.get("item_date")
         groups[grade].append(
             {
+                "analysis_id": int(row.get("id") or 0),
                 "grade": grade,
                 "company_name": str(row.get("company_name") or ""),
                 "contact_name": str(row.get("contact_name") or ""),
@@ -1561,10 +1604,11 @@ def load_latest_ai_analysis_results() -> dict[str, Any]:
                 "reason": str(row.get("reason") or ""),
                 "title": str(row.get("title") or ""),
                 "item_date": item_date.isoformat() if item_date else "",
+                "sync_status": str(row.get("sync_status") or AI_SYNC_STATUS_UNSYNCED),
+                "synced_at": row.get("synced_at").isoformat() if row.get("synced_at") else "",
             }
         )
 
-    counts = {grade: len(groups[grade]) for grade in ("A", "B", "C", "D")}
     generated_at_obj = run_row.get("generated_at")
     generated_at = generated_at_obj.isoformat() if generated_at_obj else ""
 
@@ -1588,4 +1632,30 @@ def load_latest_ai_analysis_results() -> dict[str, Any]:
     return {
         "summary": summary,
         "groups": groups,
+        "pagination": {
+            "total": total,
+            "page": safe_page,
+            "per_page": safe_per_page,
+            "total_pages": total_pages,
+        },
     }
+
+
+def mark_ai_analysis_results_synced(analysis_ids: Iterable[int]) -> int:
+    ids = sorted({int(item_id) for item_id in analysis_ids if int(item_id) > 0})
+    if not ids:
+        return 0
+
+    cfg = _mysql_config()
+    with pymysql.connect(**cfg) as conn:
+        with conn.cursor() as cur:
+            _ensure_ai_analysis_sync_columns(cur)
+            placeholders = ",".join(["%s"] * len(ids))
+            cur.execute(
+                f"UPDATE ai_analysis_result SET sync_status = %s, synced_at = CURRENT_TIMESTAMP "
+                f"WHERE id IN ({placeholders})",
+                (AI_SYNC_STATUS_SYNCED, *ids),
+            )
+            updated = int(cur.rowcount)
+        conn.commit()
+    return updated

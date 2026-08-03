@@ -29,8 +29,11 @@ CREATE TABLE IF NOT EXISTS ai_analysis_result (
   title VARCHAR(512) NULL,
   item_date DATE NULL,
   sort_order INT NOT NULL DEFAULT 0,
+  sync_status VARCHAR(16) NOT NULL DEFAULT '未同步',
+  synced_at DATETIME NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_run_grade (run_id, grade),
   INDEX idx_run_sort (run_id, sort_order),
+  INDEX idx_sync_status (sync_status),
   CONSTRAINT fk_ai_result_run FOREIGN KEY (run_id) REFERENCES ai_analysis_run(run_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

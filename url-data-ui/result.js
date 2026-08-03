@@ -1,6 +1,7 @@
 // const backendUrl = '/crawlee-api/results/mysql';
 const backendUrl = 'http://127.0.0.1:8765/results/mysql';
 const aiAnalysisUrl = 'http://127.0.0.1:8765/analysis/lead-score';
+const aiAnalysisSyncStatusUrl = 'http://127.0.0.1:8765/analysis/lead-score/sync-status';
 const crmClueCreateUrl = 'https://crm.inlink-ai.com/admin-api/crm/clues/third-party/create';
 
 const statusText = document.getElementById('statusText');
@@ -23,6 +24,9 @@ const BASE_COLUMNS = ['date', 'title', 'audit_status'];
 const GRADE_ORDER = ['A', 'B', 'C', 'D'];
 const CRM_LEVEL_BY_GRADE = { A: 4, B: 3, C: 2, D: 1 };
 let aiAnalysisRows = [];
+let aiPagination = { total: 0, page: 1, per_page: 10, total_pages: 1 };
+let aiPage = 1;
+const aiPageSize = 10;
 
 const COLUMN_LABELS = {
     date: '日期',
@@ -405,6 +409,7 @@ function flattenAiGroups(data) {
         for (const item of items) {
             const certificates = normalizeCertificates(item);
             rows.push({
+                analysis_id: Number(item?.analysis_id) || 0,
                 grade,
                 company_name: String(item?.company_name ?? '').trim(),
                 employee_count:
@@ -424,6 +429,8 @@ function flattenAiGroups(data) {
                 reason: String(item?.reason ?? '').trim(),
                 title: String(item?.title ?? '').trim(),
                 item_date: String(item?.item_date ?? '').trim(),
+                sync_status: String(item?.sync_status ?? '未同步').trim() || '未同步',
+                synced_at: String(item?.synced_at ?? '').trim(),
             });
         }
     }
@@ -448,17 +455,42 @@ function getFilteredAiRows() {
     });
 }
 
+function renderAiPagination() {
+    const page = aiPagination.page || 1;
+    const totalPages = aiPagination.total_pages || 1;
+    return `
+      <div class="pagination" aria-label="AI 分析结果分页">
+        <span>共 ${aiPagination.total || 0} 家，第 ${page} / ${totalPages} 页</span>
+        <div class="pagination-actions">
+          <button type="button" class="secondary-btn page-btn ai-page-btn" data-page="${page - 1}" ${page <= 1 ? 'disabled' : ''}>上一页</button>
+          <button type="button" class="secondary-btn page-btn ai-page-btn" data-page="${page + 1}" ${page >= totalPages ? 'disabled' : ''}>下一页</button>
+        </div>
+      </div>`;
+}
+
+function bindAiPaginationEvents() {
+    aiResultBoard?.querySelectorAll('.ai-page-btn').forEach((button) => {
+        button.addEventListener('click', () => loadSavedAiAnalysis(Number(button.dataset.page)));
+    });
+}
+
+function buildSyncStatusBadge(status) {
+    const synced = status === '已同步';
+    return `<span class="sync-status ${synced ? 'synced' : 'unsynced'}">${escapeHtml(synced ? '已同步' : '未同步')}</span>`;
+}
+
 function renderAiRows(rows) {
     if (!aiResultBoard) {
         return;
     }
 
     if (aiFilterSummary) {
-        aiFilterSummary.textContent = `共 ${aiAnalysisRows.length} 家，当前 ${rows.length} 家`;
+        aiFilterSummary.textContent = `共 ${aiPagination.total || 0} 家，当前页 ${aiAnalysisRows.length} 家，筛选后 ${rows.length} 家`;
     }
 
     if (!rows.length) {
-        aiResultBoard.innerHTML = '<p class="empty">当前筛选条件下暂无结果</p>';
+        aiResultBoard.innerHTML = `<p class="empty">当前筛选条件下暂无结果</p>${renderAiPagination()}`;
+        bindAiPaginationEvents();
         return;
     }
 
@@ -473,6 +505,7 @@ function renderAiRows(rows) {
         <td>${escapeHtml(row.certificate_names)}</td>
         <td>${escapeHtml(row.certificate_industries)}</td>
         <td>${escapeHtml(row.reason)}</td>
+        <td>${buildSyncStatusBadge(row.sync_status)}</td>
       </tr>
     `,
         )
@@ -490,12 +523,15 @@ function renderAiRows(rows) {
               <th>资质证书名称</th>
               <th>资质证书行业</th>
               <th>评级理由</th>
+              <th>同步状态</th>
             </tr>
           </thead>
           <tbody>${body}</tbody>
         </table>
       </div>
+      ${renderAiPagination()}
     `;
+    bindAiPaginationEvents();
 }
 
 function rerenderAiByFilters() {
@@ -516,6 +552,8 @@ function rerenderAiByFilters() {
 
 function renderAiAnalysis(data) {
     aiAnalysisRows = flattenAiGroups(data);
+    aiPagination = data?.pagination || { total: aiAnalysisRows.length, page: 1, per_page: aiPageSize, total_pages: 1 };
+    aiPage = Number(aiPagination.page) || 1;
     rerenderAiByFilters();
 }
 
@@ -602,17 +640,20 @@ async function syncAiResultsToCrm() {
         return;
     }
 
-    const rows = getFilteredAiRows().filter((row) => row.company_name);
-    if (!rows.length) {
-        showCopyToast('暂无可同步的AI结果');
-        return;
-    }
-
     syncToCrmBtn.disabled = true;
-    let succeeded = 0;
-    let failed = 0;
-
     try {
+        setAiStatus('正在加载全部 AI 分析结果...');
+        const allRows = await loadAllAiAnalysisRows();
+        const rows = allRows.filter((row) => row.company_name && row.sync_status !== '已同步');
+        if (!rows.length) {
+            showCopyToast('全部 AI 分析结果均已同步');
+            setAiStatus('没有待同步数据', 'ok');
+            return;
+        }
+
+        let succeeded = 0;
+        let failed = 0;
+        const succeededIds = [];
         for (let index = 0; index < rows.length; index += 1) {
             setAiStatus(`同步CRM中（${index + 1}/${rows.length}）...`);
 
@@ -631,10 +672,22 @@ async function syncAiResultsToCrm() {
                 }
 
                 succeeded += 1;
+                if (rows[index].analysis_id) {
+                    succeededIds.push(rows[index].analysis_id);
+                }
             } catch (error) {
                 console.error('CRM同步失败', rows[index].company_name, error);
                 failed += 1;
             }
+        }
+
+        if (succeededIds.length > 0) {
+            await markAiRowsSynced(succeededIds);
+            const syncedIdSet = new Set(succeededIds);
+            aiAnalysisRows = aiAnalysisRows.map((row) =>
+                syncedIdSet.has(row.analysis_id) ? { ...row, sync_status: '已同步' } : row,
+            );
+            rerenderAiByFilters();
         }
 
         if (failed === 0) {
@@ -642,8 +695,42 @@ async function syncAiResultsToCrm() {
         } else {
             setAiStatus(`同步完成：成功 ${succeeded} 条，失败 ${failed} 条`, 'err');
         }
+    } catch (error) {
+        setAiStatus(`同步失败：${error.message || '未知错误'}`, 'err');
     } finally {
         syncToCrmBtn.disabled = false;
+    }
+}
+
+async function loadAllAiAnalysisRows() {
+    const firstResponse = await fetch(`${aiAnalysisUrl}?page=1&per_page=100`, { method: 'GET' });
+    const firstData = await firstResponse.json().catch(() => ({}));
+    if (!firstResponse.ok) {
+        throw new Error(firstData?.detail || `加载 AI 分析结果失败（${firstResponse.status}）`);
+    }
+
+    const allRows = flattenAiGroups(firstData);
+    const totalPages = Number(firstData?.pagination?.total_pages) || 1;
+    for (let page = 2; page <= totalPages; page += 1) {
+        const response = await fetch(`${aiAnalysisUrl}?page=${page}&per_page=100`, { method: 'GET' });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(data?.detail || `加载 AI 分析结果失败（${response.status}）`);
+        }
+        allRows.push(...flattenAiGroups(data));
+    }
+    return allRows;
+}
+
+async function markAiRowsSynced(analysisIds) {
+    const response = await fetch(aiAnalysisSyncStatusUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ analysis_ids: analysisIds }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        throw new Error(data?.detail || `更新同步状态失败（${response.status}）`);
     }
 }
 
@@ -678,7 +765,7 @@ async function runAiAnalysis() {
             throw new Error(`请求失败 ${response.status}${detail}`);
         }
 
-        renderAiAnalysis(parsed);
+        await loadSavedAiAnalysis(1);
         setAiStatus('分析完成', 'ok');
     } catch (error) {
         aiResultBoard.innerHTML = `<p class="empty">AI分析失败：${escapeHtml(error.message)}</p>`;
@@ -769,9 +856,9 @@ async function loadResults(page = resultsPage) {
     }
 }
 
-async function loadSavedAiAnalysis() {
+async function loadSavedAiAnalysis(page = aiPage) {
     try {
-        const response = await fetch(aiAnalysisUrl, { method: "GET" });
+        const response = await fetch(`${aiAnalysisUrl}?page=${page}&per_page=${aiPageSize}`, { method: "GET" });
         if (!response.ok) {
             return;
         }
@@ -784,10 +871,14 @@ async function loadSavedAiAnalysis() {
             return;
         }
 
-        const total = Number(parsed?.summary?.total || 0);
+        const total = Number(parsed?.pagination?.total ?? parsed?.summary?.total ?? 0);
         if (total > 0) {
             renderAiAnalysis(parsed);
             setAiStatus("已加载历史结果", "ok");
+        } else {
+            aiAnalysisRows = [];
+            aiPagination = parsed?.pagination || aiPagination;
+            rerenderAiByFilters();
         }
     } catch {
         // Keep UI quiet on first-load historical query failures.
