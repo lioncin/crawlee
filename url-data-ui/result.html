@@ -19,6 +19,23 @@
         <h1>同泽CRM 数据抓取</h1>
       </section>
 
+      <section class="panel analysis-target-panel">
+        <div class="analysis-target-head">
+          <label for="analysisTargetSelect">选择分析目标</label>
+          <select id="analysisTargetSelect" class="analysis-target-select">
+            <option value="销售一部(minitab)">销售一部(minitab)</option>
+            <option value="销售一部(WPS)">销售一部(WPS)</option>
+            <option value="销售一部(office)">销售一部(office)</option>
+            <option value="销售一部(workbuddy)">销售一部(workbuddy)</option>
+            <option value="销售二部(minitab)">销售二部(minitab)</option>
+            <option value="销售二部(WPS)">销售二部(WPS)</option>
+            <option value="销售二部(office)">销售二部(office)</option>
+            <option value="销售二部(workbuddy)">销售二部(workbuddy)</option>
+          </select>
+        </div>
+        <div id="analysisRuleText" class="analysis-rule" aria-live="polite"></div>
+      </section>
+
       <section class="panel ai-toolbar">
         <div class="ai-toolbar-inner">
           <h2>AI分析</h2>
@@ -26,6 +43,7 @@
           <button id="syncToCrmBtn" type="button">同步到CRM</button>
           <span id="aiStatusText" class="status"></span>
         </div>
+        <p id="aiRunHint" class="ai-run-hint"></p>
       </section>
 
       <section class="panel ai-result compact-ai-result">

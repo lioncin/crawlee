@@ -9,11 +9,14 @@ const resultTables = document.getElementById('resultTables');
 const aiAnalyzeBtn = document.getElementById('aiAnalyzeBtn');
 const syncToCrmBtn = document.getElementById('syncToCrmBtn');
 const aiStatusText = document.getElementById('aiStatusText');
+const aiRunHint = document.getElementById('aiRunHint');
 const aiResultBoard = document.getElementById('aiResultBoard');
 const aiCompanySearch = document.getElementById('aiCompanySearch');
 const aiGradeFilter = document.getElementById('aiGradeFilter');
 const aiExportCsvBtn = document.getElementById('aiExportCsvBtn');
 const aiFilterSummary = document.getElementById('aiFilterSummary');
+const analysisTargetSelect = document.getElementById('analysisTargetSelect');
+const analysisRuleText = document.getElementById('analysisRuleText');
 
 const toast = document.createElement('div');
 toast.className = 'copy-toast';
@@ -27,6 +30,8 @@ let aiAnalysisRows = [];
 let aiPagination = { total: 0, page: 1, per_page: 10, total_pages: 1 };
 let aiPage = 1;
 const aiPageSize = 10;
+
+const DEFAULT_ANALYSIS_RULE = '公司处于上市的关键时期，或则询问期间，公司人员超过200人，公司营收超过1000万，并且三年内是稳步上升的，公司有质量管理的证书。';
 
 const COLUMN_LABELS = {
     date: '日期',
@@ -138,12 +143,28 @@ function setStatus(text, type = '') {
     statusText.className = `status ${type}`.trim();
 }
 
+function renderAnalysisRule() {
+    if (!analysisRuleText) {
+        return;
+    }
+    const target = analysisTargetSelect?.value || '';
+    analysisRuleText.innerHTML = `<strong>${escapeHtml(target)} 分析规则：</strong>${escapeHtml(DEFAULT_ANALYSIS_RULE)}`;
+}
+
 function setAiStatus(text, type = '') {
     if (!aiStatusText) {
         return;
     }
     aiStatusText.textContent = text;
     aiStatusText.className = `status ${type}`.trim();
+}
+
+function setAiRunHint(text, type = '') {
+    if (!aiRunHint) {
+        return;
+    }
+    aiRunHint.textContent = text;
+    aiRunHint.className = `ai-run-hint ${type}`.trim();
 }
 
 function showCopyToast(message) {
@@ -741,6 +762,7 @@ async function runAiAnalysis() {
 
     aiAnalyzeBtn.disabled = true;
     setAiStatus('分析中...');
+    setAiRunHint('分析需要五分钟时间，等五分钟后查看结果。');
     aiResultBoard.innerHTML = '<p class="empty">AI 正在分批分析公司数据，请稍候...</p>';
 
     try {
@@ -767,9 +789,11 @@ async function runAiAnalysis() {
 
         await loadSavedAiAnalysis(1);
         setAiStatus('分析完成', 'ok');
+        setAiRunHint('分析已完成，可以查看结果。', 'ok');
     } catch (error) {
         aiResultBoard.innerHTML = `<p class="empty">AI分析失败：${escapeHtml(error.message)}</p>`;
         setAiStatus('分析失败', 'err');
+        setAiRunHint('分析失败，请稍后重试。', 'err');
     } finally {
         aiAnalyzeBtn.disabled = false;
     }
@@ -812,6 +836,10 @@ function bindAiFilterEvents() {
         aiExportCsvBtn.addEventListener('click', () => {
             exportAiCsv();
         });
+    }
+
+    if (analysisTargetSelect) {
+        analysisTargetSelect.addEventListener('change', renderAnalysisRule);
     }
 }
 
@@ -889,6 +917,7 @@ async function initPage() {
     bindAiAnalyzeEvent();
     bindSyncToCrmEvent();
     bindAiFilterEvents();
+    renderAnalysisRule();
     await loadSavedAiAnalysis();
     await loadResults();
 }
